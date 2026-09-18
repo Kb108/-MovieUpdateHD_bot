@@ -1,0 +1,605 @@
+import os
+import re
+import time
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import requests
+from pyrogram import Client
+from pyrogram.errors import FloodWait, RPCError
+
+
+# =========================================================
+# ENVIRONMENT VARIABLES
+# =========================================================
+
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+SESSION_STRING = os.environ["SESSION_STRING"]
+
+WORKER_URL = os.environ["WORKER_URL"].rstrip("/")
+INDEX_SECRET = os.environ["INDEX_SECRET"]
+
+PORT = int(os.environ.get("PORT", "10000"))
+
+
+# =========================================================
+# HTTP HEALTH SERVER FOR RENDER
+# =========================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        if self.path in ["/", "/health", "/healthz"]:
+            body = b"Movie Cloud Indexer is running!"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            body = b"Not Found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    print(f"Health server running on port {PORT}")
+    server.serve_forever()
+
+
+# =========================================================
+# TELEGRAM CLIENT
+# =========================================================
+
+app = Client(
+    "movie_cloud_indexer",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING
+)
+
+
+# =========================================================
+# WORKER API
+# =========================================================
+
+HEADERS = {
+    "X-Index-Secret": INDEX_SECRET,
+    "Content-Type": "application/json",
+}
+
+
+def get_job():
+    try:
+        response = requests.get(
+            f"{WORKER_URL}/index-job",
+            headers={
+                "X-Index-Secret": INDEX_SECRET
+            },
+            timeout=30
+        )
+
+        if response.status_code == 204:
+            return None
+
+        if response.status_code != 200:
+            print(
+                "Worker job request failed:",
+                response.status_code,
+                response.text[:500]
+            )
+            return None
+
+        return response.json()
+
+    except Exception as e:
+        print("get_job error:", e)
+        return None
+
+
+def complete_job(job_id, status, total_indexed, error_message=""):
+    payload = {
+        "job_id": job_id,
+        "status": status,
+        "total_indexed": total_indexed,
+        "error_message": error_message
+    }
+
+    try:
+        response = requests.post(
+            f"{WORKER_URL}/index-job-complete",
+            headers=HEADERS,
+            json=payload,
+            timeout=30
+        )
+
+        print(
+            "Job complete response:",
+            response.status_code,
+            response.text[:500]
+        )
+
+    except Exception as e:
+        print("complete_job error:", e)
+
+
+def send_movie(movie):
+    try:
+        response = requests.post(
+            f"{WORKER_URL}/index",
+            headers=HEADERS,
+            json=movie,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            return True
+
+        print(
+            "Index request failed:",
+            response.status_code,
+            response.text[:500]
+        )
+
+        return False
+
+    except Exception as e:
+        print("send_movie error:", e)
+        return False
+
+
+# =========================================================
+# TEXT / MOVIE PARSER
+# =========================================================
+
+QUALITY_PATTERN = re.compile(
+    r"\b("
+    r"2160p|1080p|1080i|720p|576p|480p|360p|"
+    r"4K|2K|8K|"
+    r"WEB[- ]?DL|WEB[- ]?Rip|WEBRip|"
+    r"BluRay|BRRip|BDRip|HDRip|HDTV|DVDRip|CAM|"
+    r"HEVC|x265|x264"
+    r")\b",
+    re.IGNORECASE
+)
+
+SIZE_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b",
+    re.IGNORECASE
+)
+
+LANGUAGE_PATTERN = re.compile(
+    r"\b("
+    r"English|Hindi|Bengali|Bangla|Tamil|Telugu|Malayalam|"
+    r"Kannada|Marathi|Punjabi|Gujarati|Urdu|Odia|Assamese|"
+    r"Japanese|Korean|Chinese|Spanish|French|German|"
+    r"Dual Audio|Multi Audio|Multi-Audio|"
+    r"Hindi Dubbed|Bangla Dubbed|Tamil Dubbed|Telugu Dubbed"
+    r")\b",
+    re.IGNORECASE
+)
+
+
+def clean_title(text):
+    if not text:
+        return ""
+
+    lines = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # Skip common decorative lines
+        if re.fullmatch(r"[\W_]+", line):
+            continue
+
+        lines.append(line)
+
+    if not lines:
+        return ""
+
+    title = lines[0]
+
+    # Remove common decorative symbols
+    title = re.sub(
+        r"^[\s\[\]\(\){}*_~`#•⭐🔥🎬🎥📺📽️]+",
+        "",
+        title
+    )
+
+    title = re.sub(
+        r"[\s\[\]\(\){}*_~`#•⭐🔥🎬🎥📺📽️]+$",
+        "",
+        title
+    )
+
+    # Remove common labels at beginning
+    title = re.sub(
+        r"^(movie|film|title)\s*[:\-]\s*",
+        "",
+        title,
+        flags=re.IGNORECASE
+    )
+
+    return title.strip()
+
+
+def extract_language(text):
+    if not text:
+        return ""
+
+    matches = LANGUAGE_PATTERN.findall(text)
+
+    if not matches:
+        return ""
+
+    unique = []
+
+    for item in matches:
+        item = item.strip()
+
+        if item.lower() not in [x.lower() for x in unique]:
+            unique.append(item)
+
+    return ", ".join(unique[:4])
+
+
+def extract_quality(text):
+    if not text:
+        return ""
+
+    matches = QUALITY_PATTERN.findall(text)
+
+    if not matches:
+        return ""
+
+    unique = []
+
+    for item in matches:
+        item = item.strip()
+
+        if item.lower() not in [x.lower() for x in unique]:
+            unique.append(item)
+
+    return ", ".join(unique[:5])
+
+
+def extract_size(text):
+    if not text:
+        return ""
+
+    matches = SIZE_PATTERN.findall(text)
+
+    if not matches:
+        return ""
+
+    return matches[0]
+
+
+def get_message_text(message):
+    text = ""
+
+    if getattr(message, "text", None):
+        text = message.text
+
+    elif getattr(message, "caption", None):
+        text = message.caption
+
+    return text or ""
+
+
+def get_file_name(message):
+    try:
+        if message.document and message.document.file_name:
+            return message.document.file_name
+
+        if message.video and message.video.file_name:
+            return message.video.file_name
+
+        if message.audio and message.audio.file_name:
+            return message.audio.file_name
+
+    except Exception:
+        pass
+
+    return ""
+
+
+def build_movie(message, channel_id, source_username):
+    text = get_message_text(message)
+
+    file_name = get_file_name(message)
+
+    combined_text = text
+
+    if not combined_text and file_name:
+        combined_text = file_name
+
+    if not combined_text:
+        return None
+
+    title = clean_title(combined_text)
+
+    if not title:
+        return None
+
+    # Avoid indexing obvious non-movie messages
+    lower_title = title.lower()
+
+    ignored_words = [
+        "subscribe",
+        "join now",
+        "advertisement",
+        "admin",
+        "contact us",
+        "follow us",
+        "request here",
+        "rules"
+    ]
+
+    if any(word in lower_title for word in ignored_words):
+        return None
+
+    language = extract_language(combined_text)
+    quality = extract_quality(combined_text)
+    size = extract_size(combined_text)
+
+    movie = {
+        "title": title,
+        "language": language,
+        "quality": quality,
+        "size": size,
+        "poster": "",
+        "channel_id": str(channel_id),
+        "message_id": int(message.id),
+        "source_username": source_username or ""
+    }
+
+    return movie
+
+
+# =========================================================
+# CHANNEL INFORMATION
+# =========================================================
+
+def get_source_chat(job):
+    source_username = job.get("source_username") or ""
+    source_channel_id = job.get("source_channel_id")
+
+    if source_username:
+        return source_username
+
+    if source_channel_id:
+        try:
+            return int(source_channel_id)
+        except Exception:
+            return source_channel_id
+
+    return None
+
+
+# =========================================================
+# PROCESS ONE JOB
+# =========================================================
+
+def process_job(job):
+    job_id = job.get("id")
+    source_channel_id = job.get("source_channel_id")
+    source_username = job.get("source_username") or ""
+
+    print("")
+    print("=" * 60)
+    print("NEW INDEX JOB")
+    print("Job ID:", job_id)
+    print("Channel ID:", source_channel_id)
+    print("Username:", source_username)
+    print("=" * 60)
+
+    total_indexed = 0
+
+    chat = get_source_chat(job)
+
+    if not chat:
+        complete_job(
+            job_id,
+            "failed",
+            0,
+            "Source channel not found"
+        )
+        return
+
+    try:
+        # Verify channel access
+        info = app.get_chat(chat)
+
+        print("Channel:", info.title)
+        print("Username:", info.username or "")
+        print("ID:", info.id)
+
+    except Exception as e:
+        print("Could not access source channel:", e)
+
+        complete_job(
+            job_id,
+            "failed",
+            0,
+            f"Cannot access source channel: {e}"
+        )
+
+        return
+
+    try:
+        print("Starting old message indexing...")
+        print("This may take some time for large channels.")
+
+        for message in app.get_chat_history(chat):
+
+            try:
+                movie = build_movie(
+                    message,
+                    source_channel_id,
+                    source_username
+                )
+
+                if not movie:
+                    continue
+
+                success = send_movie(movie)
+
+                if success:
+                    total_indexed += 1
+
+                    if total_indexed % 25 == 0:
+                        print(
+                            f"Indexed {total_indexed} movies..."
+                        )
+
+                # Small delay to reduce API pressure
+                time.sleep(0.05)
+
+            except FloodWait as e:
+                print(
+                    f"Telegram FloodWait: sleeping {e.value} seconds"
+                )
+
+                time.sleep(e.value + 2)
+
+            except Exception as e:
+                print(
+                    "Message processing error:",
+                    e
+                )
+
+        print("")
+        print("Indexing completed.")
+        print("Total indexed:", total_indexed)
+
+        complete_job(
+            job_id,
+            "completed",
+            total_indexed,
+            ""
+        )
+
+    except FloodWait as e:
+
+        print(
+            f"Main FloodWait: sleeping {e.value} seconds"
+        )
+
+        time.sleep(e.value + 2)
+
+        complete_job(
+            job_id,
+            "failed",
+            total_indexed,
+            f"FloodWait: {e.value} seconds"
+        )
+
+    except RPCError as e:
+
+        print("Telegram RPC error:", e)
+
+        complete_job(
+            job_id,
+            "failed",
+            total_indexed,
+            str(e)
+        )
+
+    except Exception as e:
+
+        print("Indexing error:", e)
+
+        complete_job(
+            job_id,
+            "failed",
+            total_indexed,
+            str(e)
+        )
+
+
+# =========================================================
+# MAIN POLLING LOOP
+# =========================================================
+
+def index_loop():
+
+    print("")
+    print("=" * 60)
+    print("MOVIE CLOUD INDEXER")
+    print("=" * 60)
+
+    print("Connecting to Telegram...")
+
+    try:
+        app.start()
+
+        me = app.get_me()
+
+        print("Telegram login successful!")
+        print("Account:", me.first_name or "")
+        print("Username:", me.username or "")
+        print("User ID:", me.id)
+
+    except Exception as e:
+
+        print("")
+        print("TELEGRAM LOGIN FAILED")
+        print(str(e))
+        print("")
+
+        return
+
+    print("")
+    print("Waiting for indexing jobs...")
+    print("")
+
+    while True:
+
+        try:
+
+            job = get_job()
+
+            if job:
+
+                process_job(job)
+
+            else:
+
+                time.sleep(10)
+
+        except Exception as e:
+
+            print("Main loop error:", e)
+            time.sleep(15)
+
+
+# =========================================================
+# START
+# =========================================================
+
+if __name__ == "__main__":
+
+    # Render health server
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
+
+    # Telegram indexer
+    index_loop()
