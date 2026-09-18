@@ -1,6 +1,6 @@
 import os
 import re
-import time
+import asyncio
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -394,7 +394,7 @@ def get_source_chat(job):
 # PROCESS ONE JOB
 # =========================================================
 
-def process_job(job):
+async def process_job(job):
     job_id = job.get("id")
     source_channel_id = job.get("source_channel_id")
     source_username = job.get("source_username") or ""
@@ -422,7 +422,7 @@ def process_job(job):
 
     try:
         # Verify channel access
-        info = app.get_chat(chat)
+        info = await app.get_chat(chat)
 
         print("Channel:", info.title)
         print("Username:", info.username or "")
@@ -444,7 +444,7 @@ def process_job(job):
         print("Starting old message indexing...")
         print("This may take some time for large channels.")
 
-        for message in app.get_chat_history(chat):
+        async for message in app.get_chat_history(chat):
 
             try:
                 movie = build_movie(
@@ -467,14 +467,14 @@ def process_job(job):
                         )
 
                 # Small delay to reduce API pressure
-                time.sleep(0.05)
+                await asyncio.sleep(0.05)
 
             except FloodWait as e:
                 print(
                     f"Telegram FloodWait: sleeping {e.value} seconds"
                 )
 
-                time.sleep(e.value + 2)
+                await asyncio.sleep(e.value + 2)
 
             except Exception as e:
                 print(
@@ -499,7 +499,7 @@ def process_job(job):
             f"Main FloodWait: sleeping {e.value} seconds"
         )
 
-        time.sleep(e.value + 2)
+        await asyncio.sleep(e.value + 2)
 
         complete_job(
             job_id,
@@ -535,7 +535,7 @@ def process_job(job):
 # MAIN POLLING LOOP
 # =========================================================
 
-def index_loop():
+async def index_loop():
 
     print("")
     print("=" * 60)
@@ -545,9 +545,9 @@ def index_loop():
     print("Connecting to Telegram...")
 
     try:
-        app.start()
+        await app.start()
 
-        me = app.get_me()
+        me = await app.get_me()
 
         print("Telegram login successful!")
         print("Account:", me.first_name or "")
@@ -575,16 +575,16 @@ def index_loop():
 
             if job:
 
-                process_job(job)
+                await process_job(job)
 
             else:
 
-                time.sleep(10)
+                await asyncio.sleep(10)
 
         except Exception as e:
 
             print("Main loop error:", e)
-            time.sleep(15)
+            await asyncio.sleep(15)
 
 
 # =========================================================
@@ -602,4 +602,4 @@ if __name__ == "__main__":
     health_thread.start()
 
     # Telegram indexer
-    index_loop()
+    asyncio.run(index_loop())
