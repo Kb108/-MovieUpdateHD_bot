@@ -601,5 +601,9 @@ if __name__ == "__main__":
 
     health_thread.start()
 
+    # Create & set explicit event loop to fix Thread/Asyncio runtime issues
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     # Telegram indexer
-    asyncio.run(index_loop())
+    loop.run_until_complete(index_loop())
