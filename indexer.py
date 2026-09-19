@@ -1,7 +1,6 @@
 import os
 import re
-import asyncio
-import json
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -25,25 +24,45 @@ PORT = int(os.environ.get("PORT", "10000"))
 
 
 # =========================================================
-# HTTP HEALTH SERVER FOR RENDER
+# RENDER HEALTH SERVER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         if self.path in ["/", "/health", "/healthz"]:
+
             body = b"Movie Cloud Indexer is running!"
+
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Type",
+                "text/plain"
+            )
+            self.send_header(
+                "Content-Length",
+                str(len(body))
+            )
             self.end_headers()
+
             self.wfile.write(body)
+
         else:
+
             body = b"Not Found"
+
             self.send_response(404)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Type",
+                "text/plain"
+            )
+            self.send_header(
+                "Content-Length",
+                str(len(body))
+            )
             self.end_headers()
+
             self.wfile.write(body)
 
     def log_message(self, format, *args):
@@ -51,8 +70,17 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    print(f"Health server running on port {PORT}")
+
+    server = HTTPServer(
+        ("0.0.0.0", PORT),
+        HealthHandler
+    )
+
+    print(
+        f"Health server running on port {PORT}",
+        flush=True
+    )
+
     server.serve_forever()
 
 
@@ -69,7 +97,7 @@ app = Client(
 
 
 # =========================================================
-# WORKER API
+# HEADERS
 # =========================================================
 
 HEADERS = {
@@ -78,8 +106,14 @@ HEADERS = {
 }
 
 
+# =========================================================
+# GET INDEX JOB
+# =========================================================
+
 def get_job():
+
     try:
+
         response = requests.get(
             f"{WORKER_URL}/index-job",
             headers={
@@ -88,25 +122,124 @@ def get_job():
             timeout=30
         )
 
+        print(
+            "Worker job response:",
+            response.status_code,
+            response.text[:1000],
+            flush=True
+        )
+
+        # No job
         if response.status_code == 204:
             return None
 
         if response.status_code != 200:
+
             print(
                 "Worker job request failed:",
                 response.status_code,
-                response.text[:500]
+                response.text[:500],
+                flush=True
             )
+
             return None
 
-        return response.json()
+        data = response.json()
+
+        # -------------------------------------------------
+        # IMPORTANT:
+        # Worker may return:
+        #
+        # {
+        #   "ok": true,
+        #   "job": {
+        #       "id": 1,
+        #       "chat_id": "...",
+        #       ...
+        #   }
+        # }
+        #
+        # OR directly:
+        #
+        # {
+        #   "id": 1,
+        #   "chat_id": "...",
+        #   ...
+        # }
+        # -------------------------------------------------
+
+        if isinstance(data, dict):
+
+            # Job inside "job"
+            if isinstance(data.get("job"), dict):
+
+                job = data["job"]
+
+            # Job inside "data"
+            elif isinstance(data.get("data"), dict):
+
+                job = data["data"]
+
+            # Direct job
+            elif data.get("id") is not None:
+
+                job = data
+
+            else:
+
+                print(
+                    "No valid job found in Worker response.",
+                    flush=True
+                )
+
+                return None
+
+            # Make sure job ID exists
+            if job.get("id") is None:
+
+                print(
+                    "Job found but ID is missing:",
+                    job,
+                    flush=True
+                )
+
+                return None
+
+            return job
+
+        return None
 
     except Exception as e:
-        print("get_job error:", e)
+
+        print(
+            "get_job error:",
+            e,
+            flush=True
+        )
+
         return None
 
 
-def complete_job(job_id, status, total_indexed, error_message=""):
+# =========================================================
+# COMPLETE JOB
+# =========================================================
+
+def complete_job(
+    job_id,
+    status,
+    total_indexed,
+    error_message=""
+):
+
+    if job_id is None:
+
+        print(
+            "ERROR: Cannot complete job because job_id is None.",
+            flush=True
+        )
+
+        return
+
     payload = {
         "job_id": job_id,
         "status": status,
@@ -115,6 +248,7 @@ def complete_job(job_id, status, total_indexed, error_message=""):
     }
 
     try:
+
         response = requests.post(
             f"{WORKER_URL}/index-job-complete",
             headers=HEADERS,
@@ -125,15 +259,27 @@ def complete_job(job_id, status, total_indexed, error_message=""):
         print(
             "Job complete response:",
             response.status_code,
-            response.text[:500]
+            response.text[:1000],
+            flush=True
         )
 
     except Exception as e:
-        print("complete_job error:", e)
 
+        print(
+            "complete_job error:",
+            e,
+            flush=True
+        )
+
+
+# =========================================================
+# SEND MOVIE TO CLOUDFLARE WORKER
+# =========================================================
 
 def send_movie(movie):
+
     try:
+
         response = requests.post(
             f"{WORKER_URL}/index",
             headers=HEADERS,
@@ -142,23 +288,31 @@ def send_movie(movie):
         )
 
         if response.status_code == 200:
+
             return True
 
         print(
             "Index request failed:",
             response.status_code,
-            response.text[:500]
+            response.text[:500],
+            flush=True
         )
 
         return False
 
     except Exception as e:
-        print("send_movie error:", e)
+
+        print(
+            "send_movie error:",
+            e,
+            flush=True
+        )
+
         return False
 
 
 # =========================================================
-# TEXT / MOVIE PARSER
+# REGEX PATTERNS
 # =========================================================
 
 QUALITY_PATTERN = re.compile(
@@ -172,10 +326,12 @@ QUALITY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+
 SIZE_PATTERN = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b",
     re.IGNORECASE
 )
+
 
 LANGUAGE_PATTERN = re.compile(
     r"\b("
@@ -189,19 +345,24 @@ LANGUAGE_PATTERN = re.compile(
 )
 
 
+# =========================================================
+# CLEAN TITLE
+# =========================================================
+
 def clean_title(text):
+
     if not text:
         return ""
 
     lines = []
 
     for line in text.splitlines():
+
         line = line.strip()
 
         if not line:
             continue
 
-        # Skip common decorative lines
         if re.fullmatch(r"[\W_]+", line):
             continue
 
@@ -212,7 +373,6 @@ def clean_title(text):
 
     title = lines[0]
 
-    # Remove common decorative symbols
     title = re.sub(
         r"^[\s\[\]\(\){}*_~`#•⭐🔥🎬🎥📺📽️]+",
         "",
@@ -225,7 +385,6 @@ def clean_title(text):
         title
     )
 
-    # Remove common labels at beginning
     title = re.sub(
         r"^(movie|film|title)\s*[:\-]\s*",
         "",
@@ -236,7 +395,12 @@ def clean_title(text):
     return title.strip()
 
 
+# =========================================================
+# EXTRACT LANGUAGE
+# =========================================================
+
 def extract_language(text):
+
     if not text:
         return ""
 
@@ -248,15 +412,24 @@ def extract_language(text):
     unique = []
 
     for item in matches:
+
         item = item.strip()
 
-        if item.lower() not in [x.lower() for x in unique]:
+        if item.lower() not in [
+            x.lower() for x in unique
+        ]:
+
             unique.append(item)
 
     return ", ".join(unique[:4])
 
 
+# =========================================================
+# EXTRACT QUALITY
+# =========================================================
+
 def extract_quality(text):
+
     if not text:
         return ""
 
@@ -268,15 +441,24 @@ def extract_quality(text):
     unique = []
 
     for item in matches:
+
         item = item.strip()
 
-        if item.lower() not in [x.lower() for x in unique]:
+        if item.lower() not in [
+            x.lower() for x in unique
+        ]:
+
             unique.append(item)
 
     return ", ".join(unique[:5])
 
 
+# =========================================================
+# EXTRACT SIZE
+# =========================================================
+
 def extract_size(text):
+
     if not text:
         return ""
 
@@ -288,27 +470,52 @@ def extract_size(text):
     return matches[0]
 
 
+# =========================================================
+# GET MESSAGE TEXT
+# =========================================================
+
 def get_message_text(message):
+
     text = ""
 
     if getattr(message, "text", None):
+
         text = message.text
 
     elif getattr(message, "caption", None):
+
         text = message.caption
 
     return text or ""
 
 
+# =========================================================
+# GET FILE NAME
+# =========================================================
+
 def get_file_name(message):
+
     try:
-        if message.document and message.document.file_name:
+
+        if (
+            message.document
+            and message.document.file_name
+        ):
+
             return message.document.file_name
 
-        if message.video and message.video.file_name:
+        if (
+            message.video
+            and message.video.file_name
+        ):
+
             return message.video.file_name
 
-        if message.audio and message.audio.file_name:
+        if (
+            message.audio
+            and message.audio.file_name
+        ):
+
             return message.audio.file_name
 
     except Exception:
@@ -317,7 +524,16 @@ def get_file_name(message):
     return ""
 
 
-def build_movie(message, channel_id, source_username):
+# =========================================================
+# BUILD MOVIE
+# =========================================================
+
+def build_movie(
+    message,
+    channel_id,
+    source_username
+):
+
     text = get_message_text(message)
 
     file_name = get_file_name(message)
@@ -325,17 +541,19 @@ def build_movie(message, channel_id, source_username):
     combined_text = text
 
     if not combined_text and file_name:
+
         combined_text = file_name
 
     if not combined_text:
+
         return None
 
     title = clean_title(combined_text)
 
     if not title:
+
         return None
 
-    # Avoid indexing obvious non-movie messages
     lower_title = title.lower()
 
     ignored_words = [
@@ -349,55 +567,95 @@ def build_movie(message, channel_id, source_username):
         "rules"
     ]
 
-    if any(word in lower_title for word in ignored_words):
+    if any(
+        word in lower_title
+        for word in ignored_words
+    ):
+
         return None
 
-    language = extract_language(combined_text)
-    quality = extract_quality(combined_text)
-    size = extract_size(combined_text)
+    language = extract_language(
+        combined_text
+    )
+
+    quality = extract_quality(
+        combined_text
+    )
+
+    size = extract_size(
+        combined_text
+    )
 
     movie = {
+
         "title": title,
+
         "language": language,
+
         "quality": quality,
+
         "size": size,
+
         "poster": "",
+
         "channel_id": str(channel_id),
+
         "message_id": int(message.id),
-        "source_username": source_username or ""
+
+        "source_username": (
+            source_username or ""
+        )
     }
 
     return movie
 
 
 # =========================================================
-# CHANNEL INFORMATION
+# GET SOURCE CHAT
 # =========================================================
 
 def get_source_chat(job):
-    source_username = job.get("source_username") or ""
-    source_channel_id = job.get("source_channel_id")
+
+    source_username = (
+        job.get("source_username") or ""
+    )
+
+    source_channel_id = job.get(
+        "source_channel_id"
+    )
 
     if source_username:
+
         return source_username
 
     if source_channel_id:
+
         try:
+
             return int(source_channel_id)
+
         except Exception:
+
             return source_channel_id
 
     return None
 
 
 # =========================================================
-# PROCESS ONE JOB
+# PROCESS JOB
 # =========================================================
 
-async def process_job(job):
+def process_job(job):
+
     job_id = job.get("id")
-    source_channel_id = job.get("source_channel_id")
-    source_username = job.get("source_username") or ""
+
+    source_channel_id = job.get(
+        "source_channel_id"
+    )
+
+    source_username = (
+        job.get("source_username") or ""
+    )
 
     print("")
     print("=" * 60)
@@ -406,30 +664,65 @@ async def process_job(job):
     print("Channel ID:", source_channel_id)
     print("Username:", source_username)
     print("=" * 60)
+    print("")
 
     total_indexed = 0
+
+    if not job_id:
+
+        print(
+            "ERROR: Job ID missing.",
+            flush=True
+        )
+
+        return
 
     chat = get_source_chat(job)
 
     if not chat:
+
         complete_job(
             job_id,
             "failed",
             0,
             "Source channel not found"
         )
+
         return
 
-    try:
-        # Verify channel access
-        info = await app.get_chat(chat)
+    # -----------------------------------------------------
+    # CHECK TELEGRAM CHANNEL
+    # -----------------------------------------------------
 
-        print("Channel:", info.title)
-        print("Username:", info.username or "")
-        print("ID:", info.id)
+    try:
+
+        info = app.get_chat(chat)
+
+        print(
+            "Channel:",
+            info.title,
+            flush=True
+        )
+
+        print(
+            "Username:",
+            info.username or "",
+            flush=True
+        )
+
+        print(
+            "ID:",
+            info.id,
+            flush=True
+        )
 
     except Exception as e:
-        print("Could not access source channel:", e)
+
+        print(
+            "Could not access source channel:",
+            e,
+            flush=True
+        )
 
         complete_job(
             job_id,
@@ -440,13 +733,27 @@ async def process_job(job):
 
         return
 
-    try:
-        print("Starting old message indexing...")
-        print("This may take some time for large channels.")
+    # -----------------------------------------------------
+    # INDEX OLD MESSAGES
+    # -----------------------------------------------------
 
-        async for message in app.get_chat_history(chat):
+    try:
+
+        print("")
+        print(
+            "Starting old message indexing...",
+            flush=True
+        )
+
+        print(
+            "This may take some time for large channels.",
+            flush=True
+        )
+
+        for message in app.get_chat_history(chat):
 
             try:
+
                 movie = build_movie(
                     message,
                     source_channel_id,
@@ -454,37 +761,55 @@ async def process_job(job):
                 )
 
                 if not movie:
+
                     continue
 
                 success = send_movie(movie)
 
                 if success:
+
                     total_indexed += 1
 
                     if total_indexed % 25 == 0:
+
                         print(
-                            f"Indexed {total_indexed} movies..."
+                            f"Indexed {total_indexed} movies...",
+                            flush=True
                         )
 
-                # Small delay to reduce API pressure
-                await asyncio.sleep(0.05)
+                time.sleep(0.05)
 
             except FloodWait as e:
+
                 print(
-                    f"Telegram FloodWait: sleeping {e.value} seconds"
+                    f"Telegram FloodWait: "
+                    f"sleeping {e.value} seconds",
+                    flush=True
                 )
 
-                await asyncio.sleep(e.value + 2)
+                time.sleep(
+                    e.value + 2
+                )
 
             except Exception as e:
+
                 print(
                     "Message processing error:",
-                    e
+                    e,
+                    flush=True
                 )
 
         print("")
-        print("Indexing completed.")
-        print("Total indexed:", total_indexed)
+        print(
+            "Indexing completed.",
+            flush=True
+        )
+
+        print(
+            "Total indexed:",
+            total_indexed,
+            flush=True
+        )
 
         complete_job(
             job_id,
@@ -496,10 +821,14 @@ async def process_job(job):
     except FloodWait as e:
 
         print(
-            f"Main FloodWait: sleeping {e.value} seconds"
+            f"Main FloodWait: sleeping "
+            f"{e.value} seconds",
+            flush=True
         )
 
-        await asyncio.sleep(e.value + 2)
+        time.sleep(
+            e.value + 2
+        )
 
         complete_job(
             job_id,
@@ -510,7 +839,11 @@ async def process_job(job):
 
     except RPCError as e:
 
-        print("Telegram RPC error:", e)
+        print(
+            "Telegram RPC error:",
+            e,
+            flush=True
+        )
 
         complete_job(
             job_id,
@@ -521,7 +854,11 @@ async def process_job(job):
 
     except Exception as e:
 
-        print("Indexing error:", e)
+        print(
+            "Indexing error:",
+            e,
+            flush=True
+        )
 
         complete_job(
             job_id,
@@ -532,39 +869,75 @@ async def process_job(job):
 
 
 # =========================================================
-# MAIN POLLING LOOP
+# MAIN INDEX LOOP
 # =========================================================
 
-async def index_loop():
+def index_loop():
 
     print("")
     print("=" * 60)
     print("MOVIE CLOUD INDEXER")
     print("=" * 60)
+    print("")
 
-    print("Connecting to Telegram...")
+    print(
+        "Connecting to Telegram...",
+        flush=True
+    )
 
     try:
-        await app.start()
 
-        me = await app.get_me()
+        app.start()
 
-        print("Telegram login successful!")
-        print("Account:", me.first_name or "")
-        print("Username:", me.username or "")
-        print("User ID:", me.id)
+        me = app.get_me()
+
+        print("")
+        print(
+            "Telegram login successful!",
+            flush=True
+        )
+
+        print(
+            "Account:",
+            me.first_name or "",
+            flush=True
+        )
+
+        print(
+            "Username:",
+            me.username or "",
+            flush=True
+        )
+
+        print(
+            "User ID:",
+            me.id,
+            flush=True
+        )
 
     except Exception as e:
 
         print("")
-        print("TELEGRAM LOGIN FAILED")
-        print(str(e))
+        print(
+            "TELEGRAM LOGIN FAILED",
+            flush=True
+        )
+
+        print(
+            str(e),
+            flush=True
+        )
+
         print("")
 
         return
 
     print("")
-    print("Waiting for indexing jobs...")
+    print(
+        "Waiting for indexing jobs...",
+        flush=True
+    )
+
     print("")
 
     while True:
@@ -575,16 +948,21 @@ async def index_loop():
 
             if job:
 
-                await process_job(job)
+                process_job(job)
 
             else:
 
-                await asyncio.sleep(10)
+                time.sleep(10)
 
         except Exception as e:
 
-            print("Main loop error:", e)
-            await asyncio.sleep(15)
+            print(
+                "Main loop error:",
+                e,
+                flush=True
+            )
+
+            time.sleep(15)
 
 
 # =========================================================
@@ -593,7 +971,7 @@ async def index_loop():
 
 if __name__ == "__main__":
 
-    # Render health server
+    # Start Render health server
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True
@@ -601,9 +979,5 @@ if __name__ == "__main__":
 
     health_thread.start()
 
-    # Create & set explicit event loop to fix Thread/Asyncio runtime issues
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    # Telegram indexer
-    loop.run_until_complete(index_loop())
+    # Start Telegram indexer
+    index_loop()
