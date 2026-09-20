@@ -1,430 +1,18 @@
 // ============================================================
-// MOVIE UPDATE HD - TELEGRAM MOVIE FILTER BOT
+// MOVIE UPDATE HD
+// Telegram Movie Filter Bot
 // Cloudflare Workers + D1
 // ============================================================
 
 const BOT_NAME = "Movie Update HD";
 
-const JOIN_CHANNEL = "@loot_dells";
-const JOIN_URL = "https://t.me/loot_dells";
+const SHOP_URL = "https://t.me/loot_dells";
 
-const SHOPPING_URL = "https://t.me/loot_dells";
 const OWNER_URL = "https://t.me/share_kb";
+
 const MOVIE_GROUP_URL = "https://t.me/MovieUpdateHD";
 
-const DELETE_AFTER = 300; // 5 minutes
-
-
-// ============================================================
-// MAIN WORKER
-// ============================================================
-
-export default {
-  async fetch(request, env, ctx) {
-
-    try {
-
-      const url = new URL(request.url);
-
-      // --------------------------------------------------------
-      // HOME
-      // --------------------------------------------------------
-
-      if (request.method === "GET" && url.pathname === "/") {
-        return new Response(
-          "Movie Update HD Bot is running.",
-          { status: 200 }
-        );
-      }
-
-
-      // --------------------------------------------------------
-      // WEBHOOK
-      // --------------------------------------------------------
-
-      if (request.method === "POST" && url.pathname === "/webhook") {
-
-        const update = await request.json();
-
-        await ensureDatabase(env);
-
-        await handleUpdate(update, env, ctx);
-
-        return json({
-          ok: true
-        });
-      }
-
-
-      // --------------------------------------------------------
-      // SET WEBHOOK
-      // --------------------------------------------------------
-
-      if (request.method === "GET" && url.pathname === "/setwebhook") {
-
-        const result = await telegram(
-          env,
-          "setWebhook",
-          {
-            url: `${url.origin}/webhook`,
-            allowed_updates: [
-              "message",
-              "channel_post",
-              "callback_query"
-            ]
-          }
-        );
-
-        return json(result);
-      }
-
-
-      // --------------------------------------------------------
-      // WEBHOOK INFO
-      // --------------------------------------------------------
-
-      if (request.method === "GET" && url.pathname === "/webhook-info") {
-
-        const result = await telegram(
-          env,
-          "getWebhookInfo",
-          {}
-        );
-
-        return json(result);
-      }
-
-
-      // --------------------------------------------------------
-      // DATABASE INIT
-      // --------------------------------------------------------
-
-      if (
-        request.method === "GET" &&
-        url.pathname === "/init-db"
-      ) {
-
-        await ensureDatabase(env);
-
-        return json({
-          ok: true,
-          message: "Database initialized."
-        });
-      }
-
-
-      // --------------------------------------------------------
-      // INDEX API
-      // --------------------------------------------------------
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/index"
-      ) {
-
-        const secret = request.headers.get("X-Index-Secret");
-
-        if (!env.INDEX_SECRET || secret !== env.INDEX_SECRET) {
-          return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
-            401
-          );
-        }
-
-        const body = await request.json();
-
-        const result = await indexMovie(
-          body,
-          env
-        );
-
-        return json({
-          ok: true,
-          result
-        });
-      }
-
-
-      // --------------------------------------------------------
-      // INDEX STATUS
-      // --------------------------------------------------------
-
-      if (
-        request.method === "GET" &&
-        url.pathname === "/index-status"
-      ) {
-
-        const secret = request.headers.get("X-Index-Secret");
-
-        if (!env.INDEX_SECRET || secret !== env.INDEX_SECRET) {
-          return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
-            401
-          );
-        }
-
-        const result = await env.DB.prepare(`
-          SELECT
-            COUNT(*) AS total
-          FROM movies
-        `).first();
-
-        return json({
-          ok: true,
-          total: Number(result?.total || 0)
-        });
-      }
-
-
-      // --------------------------------------------------------
-      // INDEX JOB
-      // --------------------------------------------------------
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/index-job"
-      ) {
-
-        const secret = request.headers.get("X-Index-Secret");
-
-        if (!env.INDEX_SECRET || secret !== env.INDEX_SECRET) {
-          return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
-            401
-          );
-        }
-
-        const body = await request.json();
-
-        const result = await createIndexJob(
-          body,
-          env
-        );
-
-        return json({
-          ok: true,
-          result
-        });
-      }
-
-
-      // --------------------------------------------------------
-      // INDEX JOB UPDATE
-      // --------------------------------------------------------
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/index-job/update"
-      ) {
-
-        const secret = request.headers.get("X-Index-Secret");
-
-        if (!env.INDEX_SECRET || secret !== env.INDEX_SECRET) {
-          return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
-            401
-          );
-        }
-
-        const body = await request.json();
-
-        const result = await updateIndexJob(
-          body,
-          env
-        );
-
-        return json({
-          ok: true,
-          result
-        });
-      }
-
-
-      return new Response(
-        "Not Found",
-        {
-          status: 404
-        }
-      );
-
-    } catch (error) {
-
-      console.error(
-        "WORKER ERROR:",
-        error?.stack || error
-      );
-
-      return json(
-        {
-          ok: false,
-          error: String(error?.message || error)
-        },
-        500
-      );
-    }
-  },
-
-
-  // ==========================================================
-  // CRON
-  // ==========================================================
-
-  async scheduled(event, env, ctx) {
-
-    ctx.waitUntil(
-      cleanupDeletedMessages(env)
-    );
-
-  }
-};
-
-
-// ============================================================
-// DATABASE
-// ============================================================
-
-async function ensureDatabase(env) {
-
-  await env.DB.batch([
-
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS movies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        language TEXT DEFAULT '',
-        quality TEXT DEFAULT '',
-        size TEXT DEFAULT '',
-        poster TEXT DEFAULT '',
-        channel_id TEXT NOT NULL,
-        message_id INTEGER NOT NULL,
-        source_username TEXT DEFAULT '',
-        created_at INTEGER DEFAULT (unixepoch())
-      )
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_movies_title
-      ON movies(title)
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_movies_channel
-      ON movies(channel_id)
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_movies_channel_title
-      ON movies(channel_id, title)
-    `),
-
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id TEXT UNIQUE NOT NULL,
-        username TEXT DEFAULT '',
-        first_name TEXT DEFAULT '',
-        created_at INTEGER DEFAULT (unixepoch())
-      )
-    `),
-
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS group_sources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id TEXT UNIQUE NOT NULL,
-        chat_title TEXT DEFAULT '',
-        source_channel_id TEXT NOT NULL,
-        source_username TEXT DEFAULT '',
-        source_title TEXT DEFAULT '',
-        created_at INTEGER DEFAULT (unixepoch()),
-        updated_at INTEGER DEFAULT (unixepoch())
-      )
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_group_sources_chat
-      ON group_sources(chat_id)
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_group_sources_source
-      ON group_sources(source_channel_id)
-    `),
-
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS index_jobs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id TEXT NOT NULL,
-        source_channel_id TEXT NOT NULL,
-        source_username TEXT DEFAULT '',
-        source_title TEXT DEFAULT '',
-        status TEXT DEFAULT 'pending',
-        total_indexed INTEGER DEFAULT 0,
-        last_message_id INTEGER DEFAULT 0,
-        error TEXT DEFAULT '',
-        created_at INTEGER DEFAULT (unixepoch()),
-        updated_at INTEGER DEFAULT (unixepoch())
-      )
-    `),
-
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS delete_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id TEXT NOT NULL,
-        message_id INTEGER NOT NULL,
-        delete_at INTEGER NOT NULL
-      )
-    `),
-
-    env.DB.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_delete_queue_time
-      ON delete_queue(delete_at)
-    `)
-
-  ]);
-
-  // ----------------------------------------------------------
-  // Migration for old database
-  // ----------------------------------------------------------
-
-  try {
-
-    const columns = await env.DB
-      .prepare(`PRAGMA table_info(movies)`)
-      .all();
-
-    const names = (columns.results || [])
-      .map(x => x.name);
-
-    if (!names.includes("source_username")) {
-
-      await env.DB.prepare(`
-        ALTER TABLE movies
-        ADD COLUMN source_username TEXT DEFAULT ''
-      `).run();
-
-    }
-
-  } catch (error) {
-
-    console.log(
-      "Migration note:",
-      error?.message || error
-    );
-
-  }
-}
+const DELETE_AFTER = 300;
 
 
 // ============================================================
@@ -433,35 +21,25 @@ async function ensureDatabase(env) {
 
 async function telegram(env, method, payload = {}) {
 
-  const response = await fetch(
-    `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`,
-    {
-      method: "POST",
+  const url =
+    `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
 
-      headers: {
-        "content-type": "application/json"
-      },
+  const response = await fetch(url, {
+    method: "POST",
 
-      body: JSON.stringify(payload)
-    }
-  );
+    headers: {
+      "Content-Type": "application/json"
+    },
 
-  const text = await response.text();
+    body: JSON.stringify(payload)
+  });
 
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Telegram returned invalid JSON for ${method}: ${text}`
-    );
-  }
+  const data = await response.json();
 
   if (!data.ok) {
 
     throw new Error(
-      `Telegram API ${method} failed: ${JSON.stringify(data)}`
+      data.description || "Telegram API error"
     );
   }
 
@@ -470,423 +48,627 @@ async function telegram(env, method, payload = {}) {
 
 
 // ============================================================
-// UPDATE HANDLER
+// HTML ESCAPE
 // ============================================================
 
-async function handleUpdate(update, env, ctx) {
+function escapeHTML(value = "") {
 
-  // ----------------------------------------------------------
-  // Channel post
-  // ----------------------------------------------------------
-
-  if (update.channel_post) {
-
-    await handleChannelPost(
-      update.channel_post,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Callback
-  // ----------------------------------------------------------
-
-  if (update.callback_query) {
-
-    await handleCallback(
-      update.callback_query,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Message
-  // ----------------------------------------------------------
-
-  if (update.message) {
-
-    await handleMessage(
-      update.message,
-      env,
-      ctx
-    );
-
-    return;
-  }
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 
 // ============================================================
-// MESSAGE HANDLER
+// JSON RESPONSE
 // ============================================================
 
-async function handleMessage(message, env, ctx) {
+function json(data, status = 200) {
 
-  const chat = message.chat;
-  const from = message.from;
-
-  if (!chat || !from) return;
-
-  await saveUser(
-    from,
-    env
-  );
-
-
-  // ----------------------------------------------------------
-  // Private / Group start
-  // ----------------------------------------------------------
-
-  if (message.text?.startsWith("/start")) {
-
-    const parts = message.text.trim().split(/\s+/);
-
-    const payload = parts[1] || "";
-
-    if (
-      payload.startsWith("movie_") &&
-      chat.type === "private"
-    ) {
-
-      const movieId = Number(
-        payload.replace("movie_", "")
-      );
-
-      if (Number.isInteger(movieId) && movieId > 0) {
-
-        await handleMovieStart(
-          message,
-          movieId,
-          env
-        );
-
-        return;
+  return new Response(
+    JSON.stringify(data),
+    {
+      status,
+      headers: {
+        "Content-Type": "application/json"
       }
     }
+  );
+}
 
-    await startCommand(
-      message,
-      env
-    );
 
-    return;
-  }
+// ============================================================
+// SCHEMA
+// ============================================================
+
+async function ensureSchema(env) {
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS movies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      language TEXT DEFAULT '',
+      quality TEXT DEFAULT '',
+      size TEXT DEFAULT '',
+      poster TEXT DEFAULT '',
+      channel_id TEXT NOT NULL,
+      message_id INTEGER NOT NULL,
+      source_username TEXT DEFAULT '',
+      created_at INTEGER DEFAULT (unixepoch())
+    )
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_movies_title
+    ON movies(title)
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_movies_channel
+    ON movies(channel_id)
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_movies_channel_title
+    ON movies(channel_id, title)
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT UNIQUE NOT NULL,
+      username TEXT DEFAULT '',
+      first_name TEXT DEFAULT '',
+      created_at INTEGER DEFAULT (unixepoch())
+    )
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS group_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT UNIQUE NOT NULL,
+      chat_title TEXT DEFAULT '',
+      source_channel_id TEXT NOT NULL,
+      source_username TEXT DEFAULT '',
+      source_title TEXT DEFAULT '',
+      created_at INTEGER DEFAULT (unixepoch()),
+      updated_at INTEGER DEFAULT (unixepoch())
+    )
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_group_sources_chat
+    ON group_sources(chat_id)
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS index_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT NOT NULL,
+      source_channel_id TEXT NOT NULL,
+      source_username TEXT DEFAULT '',
+      source_title TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending',
+      total_indexed INTEGER DEFAULT 0,
+      last_message_id INTEGER DEFAULT 0,
+      error TEXT DEFAULT '',
+      created_at INTEGER DEFAULT (unixepoch()),
+      updated_at INTEGER DEFAULT (unixepoch())
+    )
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_index_jobs_status
+    ON index_jobs(status)
+  `).run();
+
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS delete_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT NOT NULL,
+      message_id INTEGER NOT NULL,
+      delete_at INTEGER NOT NULL
+    )
+  `).run();
 
 
   // ----------------------------------------------------------
-  // Help
+  // Try adding source_username to older databases
   // ----------------------------------------------------------
 
-  if (isCommand(message.text, "/help")) {
+  try {
 
-    await helpCommand(
-      message,
-      env
-    );
+    await env.DB.prepare(`
+      ALTER TABLE movies
+      ADD COLUMN source_username TEXT DEFAULT ''
+    `).run();
 
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // About
-  // ----------------------------------------------------------
-
-  if (isCommand(message.text, "/about")) {
-
-    await aboutCommand(
-      message,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Source
-  // ----------------------------------------------------------
-
-  if (isCommand(message.text, "/source")) {
-
-    await sourceCommand(
-      message,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Set source
-  // ----------------------------------------------------------
-
-  if (isCommand(message.text, "/setsource")) {
-
-    await setSourceCommand(
-      message,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Remove source
-  // ----------------------------------------------------------
-
-  if (isCommand(message.text, "/removesource")) {
-
-    await removeSourceCommand(
-      message,
-      env
-    );
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // Group text search
-  // ----------------------------------------------------------
-
-  if (
-    chat.type === "group" ||
-    chat.type === "supergroup"
-  ) {
-
-    if (
-      message.text &&
-      !message.text.startsWith("/")
-    ) {
-
-      await searchMoviesInGroup(
-        message,
-        env
-      );
-
-      return;
-    }
+  } catch (_) {
+    // Column already exists.
   }
 }
 
 
 // ============================================================
-// START
+// USER SAVE
 // ============================================================
 
-async function startCommand(message, env) {
+async function saveUser(env, user) {
 
-  const text = `
-<b>🎬 ${BOT_NAME}</b>
+  if (!user) return;
 
-<b>Welcome to Movie Update HD!</b>
+  try {
 
-<b>🔎 Search movies directly in your group.</b>
+    await env.DB.prepare(`
+      INSERT INTO users
+      (telegram_id, username, first_name)
+      VALUES (?, ?, ?)
+      ON CONFLICT(telegram_id)
+      DO UPDATE SET
+        username = excluded.username,
+        first_name = excluded.first_name
+    `)
+      .bind(
+        String(user.id),
+        user.username || "",
+        user.first_name || ""
+      )
+      .run();
 
-<b>📂 Each group can have its own Source Channel.</b>
+  } catch (error) {
 
-<b>⚡ Fast movie delivery</b>
+    console.log(
+      "saveUser error:",
+      error.message
+    );
+  }
+}
 
-<b>🗑️ Messages and delivered movies are automatically deleted after 5 minutes.</b>
 
-<b>Use the buttons below to get started.</b>
-`;
+// ============================================================
+// JOIN CHECK
+// ============================================================
 
-  const keyboard = {
-    inline_keyboard: [
+async function isJoined(env, userId) {
 
-      [
-        {
-          text: "🔎 SEARCH MOVIES",
-          url: MOVIE_GROUP_URL
-        }
-      ],
+  try {
 
-      [
-        {
-          text: "❓ HELP",
-          callback_data: "help"
-        },
-        {
-          text: "🔗 REFERRAL",
-          callback_data: "referral"
-        }
-      ],
+    const member = await telegram(
+      env,
+      "getChatMember",
+      {
+        chat_id: "@loot_dells",
+        user_id: userId
+      }
+    );
 
-      [
-        {
-          text: "👑 OWNER",
-          url: OWNER_URL
-        },
-        {
-          text: "📢 MOVIE GROUP",
-          url: MOVIE_GROUP_URL
-        }
-      ],
+    return [
+      "creator",
+      "administrator",
+      "member"
+    ].includes(member.status);
 
-      [
-        {
-          text: "🛍️ AMAZON & FLIPKART OFFERS",
-          url: SHOPPING_URL
-        }
-      ]
+  } catch (_) {
 
-    ]
-  };
+    return false;
+  }
+}
 
-  await telegram(
+
+// ============================================================
+// JOIN MESSAGE
+// ============================================================
+
+async function sendJoinMessage(env, chatId) {
+
+  return telegram(
     env,
     "sendMessage",
     {
-      chat_id: message.chat.id,
-      text,
+      chat_id: chatId,
+
+      text:
+        `<b>🔐 JOIN REQUIRED</b>\n\n` +
+        `<b>Please join our shopping channel first.</b>\n\n` +
+        `<b>After joining, send your movie name again.</b>`,
+
       parse_mode: "HTML",
-      reply_markup: keyboard
+
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🛍️ JOIN CHANNEL",
+              url: SHOP_URL
+            }
+          ]
+        ]
+      }
     }
   );
 }
 
 
 // ============================================================
-// HELP
+// SHOPPING BUTTON
 // ============================================================
 
-async function helpCommand(message, env) {
+function shoppingButton() {
 
-  const text = `
-<b>❓ ${BOT_NAME} HELP</b>
-
-<b>🔎 Search</b>
-Send the movie name in a configured group.
-
-<b>⚙️ Source Channel</b>
-Group administrators can use:
-
-<b>/setsource @ChannelUsername</b>
-
-<b>/source</b>
-
-<b>/removesource</b>
-
-<b>📌 Important</b>
-The bot only searches the Source Channel configured for that group.
-
-<b>🗑️ Auto Delete</b>
-Search results and delivered movies are automatically deleted after 5 minutes.
-`;
-
-  await sendTempMessage(
-    message.chat.id,
-    text,
-    env,
-    {}
-  );
+  return [
+    {
+      text: "🔗 CLICK HERE",
+      url: SHOP_URL
+    }
+  ];
 }
 
 
 // ============================================================
-// ABOUT
+// TEMP MESSAGE
 // ============================================================
 
-async function aboutCommand(message, env) {
+async function sendTempMessage(
+  env,
+  chatId,
+  text,
+  replyMarkup = null
+) {
 
-  const text = `
-<b>ℹ️ ABOUT ${BOT_NAME}</b>
-
-<b>Movie Update HD</b> is a Telegram movie search and delivery bot.
-
-<b>⚡ Fast Search</b>
-<b>📂 Group-wise Source</b>
-<b>🎬 Movie Delivery</b>
-<b>🗑️ 5 Minute Auto Delete</b>
-
-<b>Powered by Movie Update HD</b>
-`;
-
-  await sendTempMessage(
-    message.chat.id,
-    text,
-    env,
-    {}
-  );
-}
-
-
-// ============================================================
-// SOURCE COMMAND
-// ============================================================
-
-async function sourceCommand(message, env) {
+  const keyboard = [
+    shoppingButton()
+  ];
 
   if (
-    message.chat.type !== "group" &&
-    message.chat.type !== "supergroup"
+    replyMarkup &&
+    replyMarkup.inline_keyboard
   ) {
 
-    await sendTempMessage(
-      message.chat.id,
-      `<b>⚙️ SOURCE SETTINGS</b>
-
-<b>This command must be used inside a group.</b>`,
-      env,
-      {}
+    keyboard.push(
+      ...replyMarkup.inline_keyboard
     );
-
-    return;
   }
 
-  const source = await getGroupSource(
-    message.chat.id,
-    env
+  const result = await telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+
+      reply_markup: {
+        inline_keyboard: keyboard
+      }
+    }
   );
+
+
+  await queueDelete(
+    env,
+    chatId,
+    result.message_id
+  );
+
+
+  return result;
+}
+
+
+// ============================================================
+// DELETE QUEUE
+// ============================================================
+
+async function queueDelete(
+  env,
+  chatId,
+  messageId
+) {
+
+  const deleteAt =
+    Math.floor(Date.now() / 1000) +
+    DELETE_AFTER;
+
+  await env.DB.prepare(`
+    INSERT INTO delete_queue
+    (chat_id, message_id, delete_at)
+    VALUES (?, ?, ?)
+  `)
+    .bind(
+      String(chatId),
+      Number(messageId),
+      deleteAt
+    )
+    .run();
+}
+
+
+// ============================================================
+// DELETE MESSAGE
+// ============================================================
+
+async function safeDelete(
+  env,
+  chatId,
+  messageId
+) {
+
+  try {
+
+    await telegram(
+      env,
+      "deleteMessage",
+      {
+        chat_id: chatId,
+        message_id: messageId
+      }
+    );
+
+  } catch (_) {}
+}
+
+
+// ============================================================
+// PARSE MOVIE TITLE
+// ============================================================
+
+function extractMovieData(
+  text,
+  fallbackTitle = "Movie"
+) {
+
+  text = String(text || "").trim();
+
+  const lines = text
+    .split(/\r?\n/)
+    .map(x => x.trim())
+    .filter(Boolean);
+
+
+  let title =
+    lines.length
+      ? lines[0]
+      : fallbackTitle;
+
+
+  const prefixes = [
+    "movie:",
+    "movie -",
+    "movie",
+    "title:",
+    "title -",
+    "film:",
+    "film -"
+  ];
+
+
+  const lower =
+    title.toLowerCase();
+
+
+  for (const prefix of prefixes) {
+
+    if (lower.startsWith(prefix)) {
+
+      title =
+        title
+          .slice(prefix.length)
+          .trim();
+
+      break;
+    }
+  }
+
+
+  let language = "";
+  let quality = "";
+  let size = "";
+
+
+  const languageList = [
+    "hindi",
+    "english",
+    "bengali",
+    "bangla",
+    "tamil",
+    "telugu",
+    "malayalam",
+    "kannada",
+    "marathi",
+    "punjabi",
+    "gujarati",
+    "urdu"
+  ];
+
+
+  const lowerText =
+    text.toLowerCase();
+
+
+  for (const lang of languageList) {
+
+    if (lowerText.includes(lang)) {
+
+      language =
+        lang.charAt(0).toUpperCase() +
+        lang.slice(1);
+
+      break;
+    }
+  }
+
+
+  const qualityMatch =
+    lowerText.match(
+      /\b(2160p|4k|1440p|1080p|720p|480p|360p|240p|web-dl|webdl|bluray|blu-ray|webrip|hdrip|hdcam|cam)\b/
+    );
+
+
+  if (qualityMatch) {
+
+    quality =
+      qualityMatch[1].toUpperCase();
+  }
+
+
+  const sizeMatch =
+    text.match(
+      /(\d+(?:\.\d+)?)\s*(GB|MB|KB)/i
+    );
+
+
+  if (sizeMatch) {
+
+    size =
+      `${sizeMatch[1]} ${sizeMatch[2].toUpperCase()}`;
+  }
+
+
+  return {
+    title: title || fallbackTitle,
+    language,
+    quality,
+    size
+  };
+}
+
+
+// ============================================================
+// GET SOURCE FOR GROUP
+// ============================================================
+
+async function getGroupSource(
+  env,
+  chatId
+) {
+
+  return env.DB.prepare(`
+    SELECT *
+    FROM group_sources
+    WHERE chat_id = ?
+    LIMIT 1
+  `)
+    .bind(String(chatId))
+    .first();
+}
+
+
+// ============================================================
+// CHECK ADMIN
+// ============================================================
+
+async function isAdmin(
+  env,
+  chatId,
+  userId
+) {
+
+  try {
+
+    const member =
+      await telegram(
+        env,
+        "getChatMember",
+        {
+          chat_id: chatId,
+          user_id: userId
+        }
+      );
+
+
+    return [
+      "creator",
+      "administrator"
+    ].includes(member.status);
+
+  } catch (_) {
+
+    return false;
+  }
+}
+
+
+// ============================================================
+// GET CHAT
+// ============================================================
+
+async function getChat(
+  env,
+  chatId
+) {
+
+  return telegram(
+    env,
+    "getChat",
+    {
+      chat_id: chatId
+    }
+  );
+}
+
+
+// ============================================================
+// PARSE SOURCE
+// ============================================================
+
+async function resolveSource(
+  env,
+  source
+) {
+
+  source =
+    String(source || "").trim();
 
   if (!source) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>⚙️ SOURCE CHANNEL</b>
-
-<b>❌ No Source Channel is configured for this group.</b>
-
-<b>Admin can set one using:</b>
-
-<b>/setsource @ChannelUsername</b>`,
-      env,
-      {}
+    throw new Error(
+      "Source channel is required."
     );
-
-    return;
   }
 
-  const username = source.source_username
-    ? `@${source.source_username.replace("@", "")}`
-    : source.source_channel_id;
 
-  const text = `
-<b>⚙️ SOURCE CHANNEL</b>
+  let chat;
 
-<b>📢 Channel:</b> ${escapeHTML(username)}
 
-<b>📌 Title:</b> ${escapeHTML(source.source_title || "Unknown")}
+  try {
 
-<b>🟢 Status:</b> Active
-`;
+    chat =
+      await getChat(
+        env,
+        source
+      );
 
-  await sendTempMessage(
-    message.chat.id,
-    text,
-    env,
-    {}
-  );
+  } catch (error) {
+
+    throw new Error(
+      "I could not access this Source Channel. Make sure the bot is added as an administrator."
+    );
+  }
+
+
+  return {
+    id: String(chat.id),
+
+    username:
+      chat.username
+        ? `@${chat.username}`
+        : "",
+
+    title:
+      chat.title ||
+      chat.first_name ||
+      "Source Channel"
+  };
 }
 
 
@@ -894,139 +676,121 @@ async function sourceCommand(message, env) {
 // SET SOURCE
 // ============================================================
 
-async function setSourceCommand(message, env) {
+async function setSourceCommand(
+  env,
+  message,
+  sourceText
+) {
+
+  const chatId =
+    String(message.chat.id);
+
 
   if (
     message.chat.type !== "group" &&
     message.chat.type !== "supergroup"
   ) {
 
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ This command can only be used in a group.</b>`,
+    await telegram(
       env,
-      {}
-    );
-
-    return;
-  }
-
-
-  const isAdmin = await isGroupAdmin(
-    message.chat.id,
-    message.from.id,
-    env
-  );
-
-  if (!isAdmin) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ ADMIN ONLY</b>
-
-<b>Only group administrators can change the Source Channel.</b>`,
-      env,
-      {}
-    );
-
-    return;
-  }
-
-
-  const parts = (message.text || "")
-    .trim()
-    .split(/\s+/);
-
-  if (!parts[1]) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>⚙️ SET SOURCE CHANNEL</b>
-
-<b>Usage:</b>
-
-<b>/setsource @ChannelUsername</b>
-
-<b>Example:</b>
-
-<b>/setsource @MovieUpdateHD</b>`,
-      env,
-      {}
-    );
-
-    return;
-  }
-
-
-  let sourceInput = parts[1].trim();
-
-  if (
-    !sourceInput.startsWith("@") &&
-    !sourceInput.startsWith("-100")
-  ) {
-
-    sourceInput = "@" + sourceInput;
-  }
-
-
-  let sourceChat;
-
-  try {
-
-    sourceChat = await telegram(
-      env,
-      "getChat",
+      "sendMessage",
       {
-        chat_id: sourceInput
+        chat_id: chatId,
+        text:
+          "<b>⚠️ Use /setsource inside your group.</b>",
+        parse_mode: "HTML"
       }
     );
 
+    return;
+  }
+
+
+  const admin =
+    await isAdmin(
+      env,
+      chatId,
+      message.from.id
+    );
+
+
+  if (!admin) {
+
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id: chatId,
+        text:
+          "<b>❌ Only group administrators can set the Source Channel.</b>",
+        parse_mode: "HTML"
+      }
+    );
+
+    return;
+  }
+
+
+  if (!sourceText) {
+
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id: chatId,
+        text:
+          "<b>❌ Please provide a Source Channel.</b>\n\n" +
+          "<b>Example:</b>\n" +
+          "<code>/setsource @yourchannel</code>",
+        parse_mode: "HTML"
+      }
+    );
+
+    return;
+  }
+
+
+  let source;
+
+  try {
+
+    source =
+      await resolveSource(
+        env,
+        sourceText
+      );
+
   } catch (error) {
 
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ SOURCE CHANNEL NOT FOUND</b>
-
-<b>Telegram could not access:</b>
-
-<code>${escapeHTML(sourceInput)}</code>
-
-<b>Make sure:</b>
-<b>1. The username is correct.</b>
-<b>2. The bot is an administrator in the channel.</b>`,
+    await telegram(
       env,
-      {}
+      "sendMessage",
+      {
+        chat_id: chatId,
+        text:
+          `<b>❌ ${escapeHTML(error.message)}</b>`,
+        parse_mode: "HTML"
+      }
     );
 
     return;
   }
 
 
-  if (sourceChat.type !== "channel") {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ INVALID SOURCE</b>
-
-<b>Please provide a Telegram Channel.</b>`,
-      env,
-      {}
-    );
-
-    return;
-  }
+  const existing =
+    await env.DB.prepare(`
+      SELECT *
+      FROM group_sources
+      WHERE chat_id = ?
+      LIMIT 1
+    `)
+      .bind(chatId)
+      .first();
 
 
-  const sourceChannelId = String(
-    sourceChat.id
-  );
-
-  const sourceUsername =
-    sourceChat.username || "";
-
-  const sourceTitle =
-    sourceChat.title || "";
-
+  // ----------------------------------------------------------
+  // Save source
+  // ----------------------------------------------------------
 
   await env.DB.prepare(`
     INSERT INTO group_sources
@@ -1048,52 +812,223 @@ async function setSourceCommand(message, env) {
       source_title = excluded.source_title,
       updated_at = unixepoch()
   `)
-  .bind(
-    String(message.chat.id),
-    message.chat.title || "",
-    sourceChannelId,
-    sourceUsername,
-    sourceTitle
-  )
-  .run();
+    .bind(
+      chatId,
+      message.chat.title || "",
+      source.id,
+      source.username,
+      source.title
+    )
+    .run();
 
 
-  await createIndexJob(
-    {
-      chat_id: String(message.chat.id),
-      source_channel_id: sourceChannelId,
-      source_username: sourceUsername,
-      source_title: sourceTitle
-    },
-    env
-  );
+  // ----------------------------------------------------------
+  // Check whether source already has movies
+  // ----------------------------------------------------------
+
+  const movieCount =
+    await env.DB.prepare(`
+      SELECT COUNT(*) AS count
+      FROM movies
+      WHERE channel_id = ?
+    `)
+      .bind(source.id)
+      .first();
 
 
-  const displaySource =
-    sourceUsername
-      ? `@${sourceUsername}`
-      : sourceTitle;
+  const existingJob =
+    await env.DB.prepare(`
+      SELECT *
+      FROM index_jobs
+      WHERE source_channel_id = ?
+      AND status IN ('pending', 'running')
+      ORDER BY id DESC
+      LIMIT 1
+    `)
+      .bind(source.id)
+      .first();
 
 
-  const text = `
-<b>✅ SOURCE CHANNEL SET</b>
+  let statusText;
 
-<b>📢 Channel:</b> ${escapeHTML(displaySource)}
 
-<b>📌 Title:</b> ${escapeHTML(sourceTitle)}
+  if (Number(movieCount?.count || 0) > 0) {
 
-<b>🟢 Status:</b> Active
+    statusText =
+      "ALREADY INDEXED";
 
-<b>📥 New posts will be indexed automatically.</b>
+  } else if (existingJob) {
 
-<b>⚠️ Old channel history requires the separate Indexer service.</b>
-`;
+    statusText =
+      "INDEXING QUEUED";
 
-  await sendTempMessage(
-    message.chat.id,
-    text,
+  } else {
+
+    await env.DB.prepare(`
+      INSERT INTO index_jobs
+      (
+        chat_id,
+        source_channel_id,
+        source_username,
+        source_title,
+        status
+      )
+      VALUES (?, ?, ?, ?, 'pending')
+    `)
+      .bind(
+        chatId,
+        source.id,
+        source.username,
+        source.title
+      )
+      .run();
+
+    statusText =
+      "INDEXING QUEUED";
+  }
+
+
+  await telegram(
     env,
-    {}
+    "sendMessage",
+    {
+      chat_id: chatId,
+
+      text:
+        `<b>✅ SOURCE CHANNEL SET</b>\n\n` +
+
+        `<b>📢 Channel:</b>\n` +
+        `<b>${escapeHTML(source.title)}</b>\n\n` +
+
+        `<b>🔗 Username:</b>\n` +
+        `<b>${escapeHTML(source.username || "Private Channel")}</b>\n\n` +
+
+        `<b>📊 INDEX STATUS:</b>\n` +
+        `<b>${statusText}</b>\n\n` +
+
+        `<b>🤖 Movie search will use this Source Channel.</b>`,
+
+      parse_mode: "HTML"
+    }
+  );
+}
+
+
+// ============================================================
+// SOURCE COMMAND
+// ============================================================
+
+async function sourceCommand(
+  env,
+  message
+) {
+
+  const chatId =
+    String(message.chat.id);
+
+
+  const source =
+    await getGroupSource(
+      env,
+      chatId
+    );
+
+
+  if (!source) {
+
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id: chatId,
+
+        text:
+          "<b>📢 NO SOURCE CHANNEL SET</b>\n\n" +
+          "<b>An administrator can set one using:</b>\n\n" +
+          "<code>/setsource @channel</code>",
+
+        parse_mode: "HTML"
+      }
+    );
+
+    return;
+  }
+
+
+  const job =
+    await env.DB.prepare(`
+      SELECT *
+      FROM index_jobs
+      WHERE source_channel_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `)
+      .bind(source.source_channel_id)
+      .first();
+
+
+  let status =
+    "READY";
+
+
+  if (job) {
+
+    if (job.status === "pending") {
+      status = "INDEXING QUEUED";
+    }
+
+    else if (job.status === "running") {
+      status = "INDEXING";
+    }
+
+    else if (job.status === "failed") {
+      status = "INDEXING FAILED";
+    }
+
+    else if (job.status === "completed") {
+      status = "READY";
+    }
+  }
+
+
+  const count =
+    await env.DB.prepare(`
+      SELECT COUNT(*) AS count
+      FROM movies
+      WHERE channel_id = ?
+    `)
+      .bind(source.source_channel_id)
+      .first();
+
+
+  await telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+
+      text:
+        `<b>📢 CURRENT SOURCE CHANNEL</b>\n\n` +
+
+        `<b>Channel:</b>\n` +
+        `<b>${escapeHTML(source.source_title)}</b>\n\n` +
+
+        `<b>Username:</b>\n` +
+        `<b>${escapeHTML(source.source_username || "Private Channel")}</b>\n\n` +
+
+        `<b>📊 INDEX STATUS:</b>\n` +
+        `<b>${status}</b>\n\n` +
+
+        `<b>🎬 Indexed Movies:</b> ` +
+        `<b>${Number(count?.count || 0)}</b>\n\n` +
+
+        `<b>🤖 Movie search buttons open Movie Update HD Bot.</b>\n\n` +
+
+        `<b>🗑️ To remove this Source Channel:</b>\n` +
+        `<code>/removesource</code>`,
+
+      parse_mode: "HTML"
+    }
   );
 }
 
@@ -1102,31 +1037,45 @@ async function setSourceCommand(message, env) {
 // REMOVE SOURCE
 // ============================================================
 
-async function removeSourceCommand(message, env) {
+async function removeSourceCommand(
+  env,
+  message
+) {
+
+  const chatId =
+    String(message.chat.id);
+
 
   if (
     message.chat.type !== "group" &&
     message.chat.type !== "supergroup"
   ) {
+
     return;
   }
 
 
-  const isAdmin = await isGroupAdmin(
-    message.chat.id,
-    message.from.id,
-    env
-  );
-
-  if (!isAdmin) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ ADMIN ONLY</b>
-
-<b>Only group administrators can remove the Source Channel.</b>`,
+  const admin =
+    await isAdmin(
       env,
-      {}
+      chatId,
+      message.from.id
+    );
+
+
+  if (!admin) {
+
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id: chatId,
+
+        text:
+          "<b>❌ Only group administrators can remove the Source Channel.</b>",
+
+        parse_mode: "HTML"
+      }
     );
 
     return;
@@ -1137,240 +1086,241 @@ async function removeSourceCommand(message, env) {
     DELETE FROM group_sources
     WHERE chat_id = ?
   `)
-  .bind(String(message.chat.id))
-  .run();
+    .bind(chatId)
+    .run();
 
 
-  await sendTempMessage(
-    message.chat.id,
-    `<b>✅ SOURCE REMOVED</b>
+  await env.DB.prepare(`
+    DELETE FROM index_jobs
+    WHERE chat_id = ?
+    AND status IN ('pending', 'running')
+  `)
+    .bind(chatId)
+    .run();
 
-<b>This group no longer has a Source Channel configured.</b>`,
+
+  await telegram(
     env,
-    {}
-  );
-}
-
-
-// ============================================================
-// GROUP SEARCH
-// ============================================================
-
-async function searchMoviesInGroup(message, env) {
-
-  const searchText = (message.text || "")
-    .trim();
-
-  if (!searchText) return;
-
-
-  const source = await getGroupSource(
-    message.chat.id,
-    env
-  );
-
-
-  if (!source) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>⚠️ SOURCE CHANNEL NOT SET</b>
-
-<b>This group does not have a Source Channel yet.</b>
-
-<b>Ask an administrator to use:</b>
-
-<b>/setsource @ChannelUsername</b>`,
-      env,
-      {}
-    );
-
-    return;
-  }
-
-
-  const searchWords = searchText
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-
-
-  let query = `
-    SELECT *
-    FROM movies
-    WHERE channel_id = ?
-  `;
-
-  const params = [
-    source.source_channel_id
-  ];
-
-
-  for (const word of searchWords) {
-
-    query += `
-      AND LOWER(title) LIKE ?
-    `;
-
-    params.push(
-      `%${word}%`
-    );
-  }
-
-
-  query += `
-    ORDER BY id DESC
-    LIMIT 10
-  `;
-
-
-  const result = await env.DB
-    .prepare(query)
-    .bind(...params)
-    .all();
-
-
-  const movies = result.results || [];
-
-
-  if (!movies.length) {
-
-    await sendTempMessage(
-      message.chat.id,
-      `<b>❌ MOVIE NOT FOUND</b>
-
-<b>🔎 Search:</b> ${escapeHTML(searchText)}
-
-<b>No matching movie was found in this group's Source Channel.</b>`,
-      env,
-      {}
-    );
-
-    return;
-  }
-
-
-  const botInfo = await telegram(
-    env,
-    "getMe",
-    {}
-  );
-
-
-  const botUsername =
-    botInfo.username;
-
-
-  const rows = movies.map(
-    movie => [
-      {
-        text:
-          `🎬 ${movie.title}`.slice(0, 64),
-
-        url:
-          `https://t.me/${botUsername}?start=movie_${movie.id}`
-      }
-    ]
-  );
-
-
-  const text = `
-<b>🎬 SEARCH RESULTS</b>
-
-<b>🔎 ${escapeHTML(searchText)}</b>
-
-<b>📌 Found ${movies.length} result(s)</b>
-
-<b>🛍️ AMAZON &amp; FLIPKART OFFERS</b>
-
-<b>👇 Select a movie below:</b>
-
-<b>⏱️ This message will be deleted automatically after 5 minutes.</b>
-`;
-
-
-  await sendTempMessage(
-    message.chat.id,
-    text,
-    env,
+    "sendMessage",
     {
-      inline_keyboard: rows
+      chat_id: chatId,
+
+      text:
+        "<b>✅ SOURCE CHANNEL REMOVED</b>\n\n" +
+        "<b>You can set a new Source Channel using:</b>\n\n" +
+        "<code>/setsource @channel</code>",
+
+      parse_mode: "HTML"
     }
   );
 }
 
 
 // ============================================================
-// MOVIE START / DELIVERY
+// MOVIE SEARCH
 // ============================================================
 
-async function handleMovieStart(
+async function searchMovies(
+  env,
   message,
-  movieId,
-  env
+  query
 ) {
 
-  const userId =
-    message.from.id;
+  const chatId =
+    String(message.chat.id);
 
 
-  const joined =
-    await isUserJoined(
-      userId,
-      env
-    );
+  query =
+    String(query || "").trim();
 
 
-  if (!joined) {
+  if (!query) {
 
-    const text = `
-<b>🔐 JOIN REQUIRED</b>
-
-<b>Please join our channel before receiving the movie.</b>
-
-<b>After joining, press CHECK JOINED.</b>
-`;
-
-    const keyboard = {
-      inline_keyboard: [
-
-        [
-          {
-            text: "📢 JOIN CHANNEL",
-            url: JOIN_URL
-          }
-        ],
-
-        [
-          {
-            text: "✅ CHECK JOINED",
-            callback_data: `checkjoin_${movieId}`
-          }
-        ]
-
-      ]
-    };
-
-
-    await telegram(
+    await sendTempMessage(
       env,
-      "sendMessage",
-      {
-        chat_id: message.chat.id,
-        text,
-        parse_mode: "HTML",
-        reply_markup: keyboard
-      }
+      chatId,
+
+      `<b>🔎 SEARCH MOVIES</b>\n\n` +
+      `<b>Type a movie name.</b>\n\n` +
+      `<b>Example:</b>\n` +
+      `<code>KGF</code>`,
+
+      null
     );
 
     return;
   }
 
 
-  await deliverMovie(
-    message.chat.id,
-    movieId,
-    env
+  const source =
+    await getGroupSource(
+      env,
+      chatId
+    );
+
+
+  if (!source) {
+
+    await sendTempMessage(
+      env,
+      chatId,
+
+      `<b>⚠️ NO SOURCE CHANNEL</b>\n\n` +
+      `<b>This group does not have a Source Channel yet.</b>\n\n` +
+      `<b>An administrator can set one using:</b>\n` +
+      `<code>/setsource @channel</code>`,
+
+      null
+    );
+
+    return;
+  }
+
+
+  const joined =
+    await isJoined(
+      env,
+      message.from.id
+    );
+
+
+  if (!joined) {
+
+    await sendJoinMessage(
+      env,
+      chatId
+    );
+
+    return;
+  }
+
+
+  const words =
+    query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+
+
+  let sql =
+    `SELECT *
+     FROM movies
+     WHERE channel_id = ?`;
+
+
+  const bindings =
+    [source.source_channel_id];
+
+
+  for (const word of words) {
+
+    sql +=
+      ` AND LOWER(title) LIKE ?`;
+
+    bindings.push(
+      `%${word}%`
+    );
+  }
+
+
+  sql +=
+    ` ORDER BY id DESC LIMIT 20`;
+
+
+  const result =
+    await env.DB
+      .prepare(sql)
+      .bind(...bindings)
+      .all();
+
+
+  const movies =
+    result.results || [];
+
+
+  if (!movies.length) {
+
+    await sendTempMessage(
+      env,
+      chatId,
+
+      `<b>❌ MOVIE NOT FOUND</b>\n\n` +
+      `<b>Search:</b> ${escapeHTML(query)}\n\n` +
+      `<b>Try another movie name.</b>`,
+
+      null
+    );
+
+    return;
+  }
+
+
+  let text =
+    `<b>🎬 SEARCH RESULTS</b>\n\n` +
+
+    `<b>🔎 ${escapeHTML(query)}</b>\n\n` +
+
+    `<b>📌 Found ${movies.length} result(s)</b>\n\n` +
+
+    `<b>🛍️ AMAZON &amp; FLIPKART OFFERS</b>\n\n` +
+
+    `<b>👇 Select a movie below:</b>\n\n` +
+
+    `<b>⏱️ This message will be deleted automatically after 5 minutes.</b>`;
+
+
+  const buttons = [];
+
+
+  for (const movie of movies) {
+
+    buttons.push([
+      {
+        text:
+          `🎬 ${movie.title}`,
+
+        url:
+          await movieDeepLink(
+            env,
+            movie.id
+          )
+      }
+    ]);
+  }
+
+
+  await sendTempMessage(
+    env,
+    chatId,
+    text,
+
+    {
+      inline_keyboard:
+        buttons
+    }
+  );
+}
+
+
+// ============================================================
+// MOVIE DEEP LINK
+// ============================================================
+
+async function movieDeepLink(
+  env,
+  movieId
+) {
+
+  const me =
+    await telegram(
+      env,
+      "getMe"
+    );
+
+
+  return (
+    `https://t.me/${me.username}` +
+    `?start=movie_${movieId}`
   );
 }
 
@@ -1379,21 +1329,47 @@ async function handleMovieStart(
 // DELIVER MOVIE
 // ============================================================
 
-async function deliverMovie(
-  chatId,
-  movieId,
-  env
+async function deliverMovieFromDeepLink(
+  env,
+  message,
+  movieId
 ) {
 
-  const movie = await env.DB
-    .prepare(`
+  if (
+    message.chat.type !== "private"
+  ) {
+
+    return;
+  }
+
+
+  const joined =
+    await isJoined(
+      env,
+      message.from.id
+    );
+
+
+  if (!joined) {
+
+    await sendJoinMessage(
+      env,
+      message.chat.id
+    );
+
+    return;
+  }
+
+
+  const movie =
+    await env.DB.prepare(`
       SELECT *
       FROM movies
       WHERE id = ?
       LIMIT 1
     `)
-    .bind(movieId)
-    .first();
+      .bind(Number(movieId))
+      .first();
 
 
   if (!movie) {
@@ -1402,9 +1378,12 @@ async function deliverMovie(
       env,
       "sendMessage",
       {
-        chat_id: chatId,
+        chat_id: message.chat.id,
+
         text:
-          `<b>❌ MOVIE NOT FOUND</b>\n\n<b>This movie record no longer exists.</b>`,
+          "<b>❌ MOVIE NOT FOUND</b>\n\n" +
+          "<b>This movie is no longer available.</b>",
+
         parse_mode: "HTML"
       }
     );
@@ -1420,17 +1399,22 @@ async function deliverMovie(
         env,
         "copyMessage",
         {
-          chat_id: chatId,
-          from_chat_id: movie.channel_id,
-          message_id: movie.message_id
+          chat_id:
+            message.chat.id,
+
+          from_chat_id:
+            movie.channel_id,
+
+          message_id:
+            movie.message_id
         }
       );
 
 
     await queueDelete(
-      chatId,
-      copied.message_id,
-      env
+      env,
+      message.chat.id,
+      copied.message_id
     );
 
 
@@ -1439,212 +1423,386 @@ async function deliverMovie(
         env,
         "sendMessage",
         {
-          chat_id: chatId,
+          chat_id:
+            message.chat.id,
 
-          text: `
-<b>🎬 MOVIE READY</b>
+          text:
+            `<b>🎬 MOVIE READY</b>\n\n` +
 
-<b>${escapeHTML(movie.title)}</b>
+            `<b>${escapeHTML(movie.title)}</b>\n\n` +
 
-<b>⏱️ This movie will be automatically deleted after 5 minutes.</b>
-`,
+            `<b>⏱️ This movie will be automatically deleted after 5 minutes.</b>\n\n` +
 
-          parse_mode: "HTML"
+            `<b>🔎 Search Movie</b>`,
+
+          parse_mode: "HTML",
+
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🔎 SEARCH MOVIE",
+                  switch_inline_query_current_chat: ""
+                }
+              ],
+              [
+                {
+                  text: "🛍️ SHOPPING OFFERS",
+                  url: SHOP_URL
+                }
+              ]
+            ]
+          }
         }
       );
 
 
     await queueDelete(
-      chatId,
-      warning.message_id,
-      env
+      env,
+      message.chat.id,
+      warning.message_id
     );
 
 
   } catch (error) {
 
-    console.error(
-      "MOVIE DELIVERY ERROR:",
-      error?.stack || error
+    console.log(
+      "Movie delivery error:",
+      error.message
     );
 
 
-    const failed =
-      await telegram(
-        env,
-        "sendMessage",
-        {
-          chat_id: chatId,
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id: message.chat.id,
 
-          text: `
-<b>❌ MOVIE DELIVERY FAILED</b>
+        text:
+          "<b>❌ DELIVERY FAILED</b>\n\n" +
+          "<b>The movie could not be copied from the Source Channel.</b>",
 
-<b>The movie could not be delivered right now.</b>
-
-<b>Please try again later.</b>
-`,
-
-          parse_mode: "HTML"
-        }
-      );
-
-
-    await queueDelete(
-      chatId,
-      failed.message_id,
-      env
+        parse_mode: "HTML"
+      }
     );
   }
 }
 
 
 // ============================================================
-// JOIN CHECK
+// START MENU
 // ============================================================
 
-async function isUserJoined(
-  userId,
+async function sendStart(
+  env,
+  message
+) {
+
+  const me =
+    await telegram(
+      env,
+      "getMe"
+    );
+
+
+  const addGroupURL =
+    `https://t.me/${me.username}` +
+    `?startgroup=true&admin=delete_messages`;
+
+
+  const text =
+    `<b>🎬 ${BOT_NAME}</b>\n\n` +
+
+    `<b>Search movies from your configured Source Channel.</b>\n\n` +
+
+    `<b>Choose an option below.</b>`;
+
+
+  const keyboard = [
+    [
+      {
+        text: "➕ ADD YOUR GROUP",
+        url: addGroupURL
+      }
+    ],
+
+    [
+      {
+        text: "📢 SOURCE",
+        callback_data: "source"
+      },
+
+      {
+        text: "⚙️ SET SOURCE",
+        callback_data: "setsource"
+      }
+    ],
+
+    [
+      {
+        text: "❓ HELP",
+        callback_data: "help"
+      },
+
+      {
+        text: "✨ ABOUT",
+        callback_data: "about"
+      }
+    ],
+
+    [
+      {
+        text: "🛍️ SHOPPING OFFERS",
+        url: SHOP_URL
+      }
+    ],
+
+    [
+      {
+        text: "👑 OWNER",
+        url: OWNER_URL
+      }
+    ]
+  ];
+
+
+  await telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: message.chat.id,
+      text,
+      parse_mode: "HTML",
+
+      reply_markup: {
+        inline_keyboard:
+          keyboard
+      }
+    }
+  );
+}
+
+
+// ============================================================
+// HELP
+// ============================================================
+
+async function sendHelp(
+  env,
+  chatId
+) {
+
+  await telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+
+      text:
+        `<b>❓ ${BOT_NAME} HELP</b>\n\n` +
+
+        `<b>1️⃣ Add the bot to your group.</b>\n\n` +
+
+        `<b>2️⃣ Make the bot an administrator.</b>\n\n` +
+
+        `<b>3️⃣ Set your Source Channel:</b>\n` +
+        `<code>/setsource @channel</code>\n\n` +
+
+        `<b>4️⃣ Members can search movie names directly in the group.</b>\n\n` +
+
+        `<b>5️⃣ Click a movie result to receive the movie privately.</b>\n\n` +
+
+        `<b>Available Commands:</b>\n\n` +
+
+        `<code>/source</code> - View Source Channel\n` +
+        `<code>/setsource @channel</code> - Set Source\n` +
+        `<code>/removesource</code> - Remove Source\n` +
+        `<code>/help</code> - Help\n` +
+        `<code>/about</code> - About`,
+
+      parse_mode: "HTML"
+    }
+  );
+}
+
+
+// ============================================================
+// ABOUT
+// ============================================================
+
+async function sendAbout(
+  env,
+  chatId
+) {
+
+  await telegram(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+
+      text:
+        `<b>✨ ABOUT ${BOT_NAME}</b>\n\n` +
+
+        `<b>Movie search and delivery bot.</b>\n\n` +
+
+        `<b>Each group can use its own Source Channel.</b>\n\n` +
+
+        `<b>Movies are delivered privately through the bot.</b>\n\n` +
+
+        `<b>Powered by Movie Update HD</b>`,
+
+      parse_mode: "HTML"
+    }
+  );
+}
+
+
+// ============================================================
+// SET COMMANDS
+// ============================================================
+
+async function setupCommands(
   env
 ) {
 
   try {
 
-    const member =
-      await telegram(
-        env,
-        "getChatMember",
-        {
-          chat_id: JOIN_CHANNEL,
-          user_id: userId
-        }
-      );
-
-
-    return [
-      "creator",
-      "administrator",
-      "member"
-    ].includes(member.status);
+    await telegram(
+      env,
+      "setMyCommands",
+      {
+        commands: [
+          {
+            command: "start",
+            description: "Start Movie Update HD"
+          },
+          {
+            command: "source",
+            description: "View Source Channel"
+          },
+          {
+            command: "setsource",
+            description: "Set Source Channel"
+          },
+          {
+            command: "removesource",
+            description: "Remove Source Channel"
+          },
+          {
+            command: "help",
+            description: "Help"
+          },
+          {
+            command: "about",
+            description: "About"
+          }
+        ]
+      }
+    );
 
   } catch (error) {
 
-    console.error(
-      "JOIN CHECK ERROR:",
-      error?.message || error
+    console.log(
+      "setupCommands:",
+      error.message
     );
-
-    return false;
   }
 }
 
 
 // ============================================================
-// CALLBACK
+// HANDLE COMMAND
 // ============================================================
 
-async function handleCallback(
-  callback,
-  env
+async function handleCommand(
+  env,
+  message,
+  command,
+  args
 ) {
 
-  const data =
-    callback.data || "";
+  switch (command) {
 
-  const chatId =
-    callback.message?.chat?.id;
+    case "/start":
 
-  const userId =
-    callback.from?.id;
+      if (
+        args &&
+        args.startsWith("movie_")
+      ) {
 
+        const movieId =
+          args.replace(
+            "movie_",
+            ""
+          );
 
-  await telegram(
-    env,
-    "answerCallbackQuery",
-    {
-      callback_query_id:
-        callback.id
-    }
-  );
+        await deliverMovieFromDeepLink(
+          env,
+          message,
+          movieId
+        );
 
+      } else {
 
-  if (data === "help") {
+        await sendStart(
+          env,
+          message
+        );
+      }
 
-    await helpCommand(
-      {
-        chat: callback.message.chat
-      },
-      env
-    );
-
-    return;
-  }
-
-
-  if (data === "referral") {
-
-    const text = `
-<b>🔗 REFERRAL</b>
-
-<b>Invite your friends to use ${BOT_NAME}.</b>
-
-<b>More referral features can be added later.</b>
-`;
-
-    await sendTempMessage(
-      chatId,
-      text,
-      env,
-      {}
-    );
-
-    return;
-  }
+      break;
 
 
-  if (data.startsWith("checkjoin_")) {
+    case "/source":
 
-    const movieId =
-      Number(
-        data.replace("checkjoin_", "")
-      );
-
-
-    const joined =
-      await isUserJoined(
-        userId,
-        env
-      );
-
-
-    if (!joined) {
-
-      await telegram(
+      await sourceCommand(
         env,
-        "sendMessage",
-        {
-          chat_id: chatId,
-
-          text: `
-<b>❌ NOT JOINED YET</b>
-
-<b>Please join the channel first, then press CHECK JOINED again.</b>
-`,
-
-          parse_mode: "HTML"
-        }
+        message
       );
 
-      return;
-    }
+      break;
 
 
-    await deliverMovie(
-      chatId,
-      movieId,
-      env
-    );
+    case "/setsource":
 
-    return;
+      await setSourceCommand(
+        env,
+        message,
+        args
+      );
+
+      break;
+
+
+    case "/removesource":
+
+      await removeSourceCommand(
+        env,
+        message
+      );
+
+      break;
+
+
+    case "/help":
+
+      await sendHelp(
+        env,
+        message.chat.id
+      );
+
+      break;
+
+
+    case "/about":
+
+      await sendAbout(
+        env,
+        message.chat.id
+      );
+
+      break;
   }
 }
 
@@ -1654,123 +1812,108 @@ async function handleCallback(
 // ============================================================
 
 async function handleChannelPost(
-  post,
-  env
+  env,
+  message
 ) {
 
   const channelId =
-    String(post.chat.id);
+    String(message.chat.id);
 
 
   const source =
-    await env.DB
-      .prepare(`
-        SELECT *
-        FROM group_sources
-        WHERE source_channel_id = ?
-        LIMIT 1
-      `)
+    await env.DB.prepare(`
+      SELECT *
+      FROM group_sources
+      WHERE source_channel_id = ?
+      LIMIT 1
+    `)
       .bind(channelId)
       .first();
 
 
-  // If no group uses this source, still index the movie.
-  // This allows another group to configure it later.
+  if (!source) {
 
-  const title =
-    extractMovieTitle(post);
-
-
-  if (!title) {
     return;
   }
 
 
   await indexMovie(
-    {
-      title,
-      language: "",
-      quality: extractQuality(post),
-      size: extractSize(post),
-      poster: extractPoster(post),
-      channel_id: channelId,
-      message_id: post.message_id,
-      source_username:
-        post.chat.username || ""
-    },
-    env
+    env,
+    message
   );
 }
 
 
 // ============================================================
-// MOVIE INDEX
+// INDEX MOVIE
 // ============================================================
 
 async function indexMovie(
-  data,
-  env
+  env,
+  message
 ) {
 
-  if (
-    !data.title ||
-    !data.channel_id ||
-    !data.message_id
-  ) {
+  const channelId =
+    String(message.chat.id);
 
-    throw new Error(
-      "Missing title, channel_id or message_id"
-    );
+
+  const messageId =
+    Number(message.message_id || message.id);
+
+
+  if (!messageId) {
+    return null;
   }
 
 
-  // Prevent exact duplicate
-  const existing =
-    await env.DB
-      .prepare(`
-        SELECT id
-        FROM movies
-        WHERE channel_id = ?
-        AND message_id = ?
-        LIMIT 1
-      `)
+  const exists =
+    await env.DB.prepare(`
+      SELECT id
+      FROM movies
+      WHERE channel_id = ?
+      AND message_id = ?
+      LIMIT 1
+    `)
       .bind(
-        String(data.channel_id),
-        Number(data.message_id)
+        channelId,
+        messageId
       )
       .first();
 
 
-  if (existing) {
+  if (exists) {
 
-    await env.DB.prepare(`
-      UPDATE movies
-      SET
-        title = ?,
-        language = ?,
-        quality = ?,
-        size = ?,
-        poster = ?,
-        source_username = ?
-      WHERE id = ?
-    `)
-    .bind(
-      cleanTitle(data.title),
-      data.language || "",
-      data.quality || "",
-      data.size || "",
-      data.poster || "",
-      data.source_username || "",
-      existing.id
-    )
-    .run();
-
-
-    return {
-      id: existing.id,
-      updated: true
-    };
+    return exists.id;
   }
+
+
+  const text =
+    message.text ||
+    message.caption ||
+    "";
+
+
+  const source =
+    await env.DB.prepare(`
+      SELECT *
+      FROM group_sources
+      WHERE source_channel_id = ?
+      LIMIT 1
+    `)
+      .bind(channelId)
+      .first();
+
+
+  const fallbackTitle =
+    source?.source_title ||
+    "Movie";
+
+
+  const data =
+    extractMovieData(
+      text,
+      fallbackTitle
+    );
 
 
   const result =
@@ -1788,70 +1931,574 @@ async function indexMovie(
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
-    .bind(
-      cleanTitle(data.title),
-      data.language || "",
-      data.quality || "",
-      data.size || "",
-      data.poster || "",
-      String(data.channel_id),
-      Number(data.message_id),
-      data.source_username || ""
-    )
-    .run();
+      .bind(
+        data.title,
+        data.language,
+        data.quality,
+        data.size,
+        "",
+        channelId,
+        messageId,
+        source?.source_username || ""
+      )
+      .run();
 
 
-  return {
-    id: result.meta.last_row_id,
-    created: true
-  };
+  return result.meta.last_row_id;
 }
 
 
 // ============================================================
-// INDEX JOB
+// INLINE SEARCH
 // ============================================================
 
-async function createIndexJob(
-  data,
-  env
+async function handleInlineQuery(
+  env,
+  inlineQuery
 ) {
 
-  if (
-    !data.chat_id ||
-    !data.source_channel_id
-  ) {
+  const query =
+    String(
+      inlineQuery.query || ""
+    ).trim();
 
-    return {
-      created: false
-    };
+
+  const userId =
+    inlineQuery.from.id;
+
+
+  const joined =
+    await isJoined(
+      env,
+      userId
+    );
+
+
+  if (!joined) {
+
+    await telegram(
+      env,
+      "answerInlineQuery",
+      {
+        inline_query_id:
+          inlineQuery.id,
+
+        cache_time: 1,
+
+        results: [
+          {
+            type: "article",
+
+            id: "join_required",
+
+            title: "🔐 JOIN REQUIRED",
+
+            description:
+              "Join the shopping channel first.",
+
+            input_message_content: {
+              message_text:
+                `<b>🔐 JOIN REQUIRED</b>\n\n` +
+                `<b>Please join the shopping channel first.</b>`,
+              parse_mode: "HTML"
+            },
+
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "🛍️ JOIN CHANNEL",
+                    url: SHOP_URL
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    );
+
+    return;
   }
 
 
+  if (!query) {
+
+    await telegram(
+      env,
+      "answerInlineQuery",
+      {
+        inline_query_id:
+          inlineQuery.id,
+
+        cache_time: 1,
+
+        results: [
+          {
+            type: "article",
+
+            id: "help",
+
+            title: "🎬 Search Movie",
+
+            description:
+              "Type a movie name.",
+
+            input_message_content: {
+              message_text:
+                "<b>🎬 Movie Update HD</b>\n\n" +
+                "<b>Type a movie name to search.</b>",
+              parse_mode: "HTML"
+            }
+          }
+        ]
+      }
+    );
+
+    return;
+  }
+
+
+  const words =
+    query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+
+
+  let sql =
+    `SELECT *
+     FROM movies
+     WHERE 1 = 1`;
+
+
+  const bindings = [];
+
+
+  for (const word of words) {
+
+    sql +=
+      ` AND LOWER(title) LIKE ?`;
+
+    bindings.push(
+      `%${word}%`
+    );
+  }
+
+
+  sql +=
+    ` ORDER BY id DESC LIMIT 20`;
+
+
   const result =
+    await env.DB
+      .prepare(sql)
+      .bind(...bindings)
+      .all();
+
+
+  const rows =
+    result.results || [];
+
+
+  const results = [];
+
+
+  for (const movie of rows) {
+
+    const link =
+      await movieDeepLink(
+        env,
+        movie.id
+      );
+
+
+    results.push({
+      type: "article",
+
+      id: String(movie.id),
+
+      title:
+        `🎬 ${movie.title}`,
+
+      description:
+        [
+          movie.language,
+          movie.quality,
+          movie.size
+        ]
+          .filter(Boolean)
+          .join(" • "),
+
+      input_message_content: {
+        message_text:
+          `<b>🎬 ${escapeHTML(movie.title)}</b>\n\n` +
+
+          `<b>Movie Update HD</b>\n\n` +
+
+          `<b>Click GET MOVIE to receive the movie privately.</b>`,
+
+        parse_mode: "HTML"
+      },
+
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "🎬 GET MOVIE",
+              url: link
+            }
+          ]
+        ]
+      }
+    });
+  }
+
+
+  await telegram(
+    env,
+    "answerInlineQuery",
+    {
+      inline_query_id:
+        inlineQuery.id,
+
+      cache_time: 3,
+
+      results
+    }
+  );
+}
+
+
+// ============================================================
+// CALLBACK QUERY
+// ============================================================
+
+async function handleCallbackQuery(
+  env,
+  callback
+) {
+
+  const data =
+    callback.data;
+
+
+  if (
+    data === "help"
+  ) {
+
+    await telegram(
+      env,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          callback.id
+      }
+    );
+
+
+    await sendHelp(
+      env,
+      callback.message.chat.id
+    );
+
+    return;
+  }
+
+
+  if (
+    data === "about"
+  ) {
+
+    await telegram(
+      env,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          callback.id
+      }
+    );
+
+
+    await sendAbout(
+      env,
+      callback.message.chat.id
+    );
+
+    return;
+  }
+
+
+  if (
+    data === "source"
+  ) {
+
+    await telegram(
+      env,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          callback.id
+      }
+    );
+
+
+    await sourceCommand(
+      env,
+      callback.message
+    );
+
+    return;
+  }
+
+
+  if (
+    data === "setsource"
+  ) {
+
+    await telegram(
+      env,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          callback.id
+      }
+    );
+
+
+    await telegram(
+      env,
+      "sendMessage",
+      {
+        chat_id:
+          callback.message.chat.id,
+
+        text:
+          `<b>⚙️ SET SOURCE CHANNEL</b>\n\n` +
+
+          `<b>Group administrators can use:</b>\n\n` +
+
+          `<code>/setsource @channel</code>\n\n` +
+
+          `<b>Example:</b>\n` +
+          `<code>/setsource @movie_click1</code>`,
+
+        parse_mode: "HTML"
+      }
+    );
+
+    return;
+  }
+
+
+  await telegram(
+    env,
+    "answerCallbackQuery",
+    {
+      callback_query_id:
+        callback.id
+    }
+  );
+}
+
+
+// ============================================================
+// MESSAGE HANDLER
+// ============================================================
+
+async function handleMessage(
+  env,
+  message
+) {
+
+  if (!message) {
+    return;
+  }
+
+
+  if (message.from) {
+
+    await saveUser(
+      env,
+      message.from
+    );
+  }
+
+
+  const text =
+    message.text ||
+    message.caption ||
+    "";
+
+
+  if (
+    text.startsWith("/")
+  ) {
+
+    const first =
+      text
+        .trim()
+        .split(/\s+/)[0];
+
+
+    const command =
+      first
+        .split("@")[0]
+        .toLowerCase();
+
+
+    const args =
+      text
+        .trim()
+        .split(/\s+/)
+        .slice(1)
+        .join(" ");
+
+
+    await handleCommand(
+      env,
+      message,
+      command,
+      args
+    );
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // Group movie search
+  // ----------------------------------------------------------
+
+  if (
+    (
+      message.chat.type === "group" ||
+      message.chat.type === "supergroup"
+    ) &&
+    message.text
+  ) {
+
+    const query =
+      message.text.trim();
+
+
+    // Ignore very short messages
+    if (query.length >= 2) {
+
+      await searchMovies(
+        env,
+        message,
+        query
+      );
+    }
+  }
+}
+
+
+// ============================================================
+// INDEX API
+// ============================================================
+
+async function indexAPI(
+  env,
+  request
+) {
+
+  const body =
+    await request.json();
+
+
+  const fakeMessage = {
+    chat: {
+      id:
+        Number(body.channel_id) ||
+        String(body.channel_id)
+    },
+
+    message_id:
+      Number(body.message_id),
+
+    text:
+      body.text || "",
+
+    caption:
+      body.text || ""
+  };
+
+
+  const id =
+    await indexMovie(
+      env,
+      fakeMessage
+    );
+
+
+  return json({
+    ok: true,
+    id
+  });
+}
+
+
+// ============================================================
+// INDEX JOB API
+// ============================================================
+
+async function getIndexJob(
+  env
+) {
+
+  // ----------------------------------------------------------
+  // Recover stale running jobs older than 30 minutes
+  // ----------------------------------------------------------
+
+  await env.DB.prepare(`
+    UPDATE index_jobs
+    SET status = 'pending',
+        updated_at = unixepoch()
+    WHERE status = 'running'
+    AND updated_at < unixepoch() - 1800
+  `).run();
+
+
+  const job =
     await env.DB.prepare(`
-      INSERT INTO index_jobs
-      (
-        chat_id,
-        source_channel_id,
-        source_username,
-        source_title,
-        status
-      )
-      VALUES (?, ?, ?, ?, 'pending')
+      SELECT *
+      FROM index_jobs
+      WHERE status = 'pending'
+      ORDER BY id ASC
+      LIMIT 1
     `)
-    .bind(
-      String(data.chat_id),
-      String(data.source_channel_id),
-      data.source_username || "",
-      data.source_title || ""
-    )
+      .first();
+
+
+  if (!job) {
+
+    return json({
+      ok: true,
+      job: null
+    });
+  }
+
+
+  await env.DB.prepare(`
+    UPDATE index_jobs
+    SET status = 'running',
+        updated_at = unixepoch()
+    WHERE id = ?
+  `)
+    .bind(job.id)
     .run();
 
 
-  return {
-    id: result.meta.last_row_id
-  };
+  return json({
+    ok: true,
+
+    job: {
+      ...job,
+      status: "running"
+    }
+  });
 }
 
 
@@ -1860,501 +2507,529 @@ async function createIndexJob(
 // ============================================================
 
 async function updateIndexJob(
-  data,
-  env
+  env,
+  request
 ) {
 
-  if (!data.id) {
+  const body =
+    await request.json();
 
-    throw new Error(
-      "Job ID is required"
-    );
-  }
+
+  const jobId =
+    Number(body.job_id);
+
+
+  const status =
+    body.status || "running";
 
 
   await env.DB.prepare(`
     UPDATE index_jobs
+
     SET
-      status = COALESCE(?, status),
+      status = ?,
       total_indexed = COALESCE(?, total_indexed),
       last_message_id = COALESCE(?, last_message_id),
-      error = COALESCE(?, error),
+      error = ?,
       updated_at = unixepoch()
+
     WHERE id = ?
   `)
-  .bind(
-    data.status ?? null,
-    data.total_indexed ?? null,
-    data.last_message_id ?? null,
-    data.error ?? null,
-    data.id
-  )
-  .run();
-
-
-  return {
-    updated: true
-  };
-}
-
-
-// ============================================================
-// GROUP SOURCE
-// ============================================================
-
-async function getGroupSource(
-  chatId,
-  env
-) {
-
-  return await env.DB
-    .prepare(`
-      SELECT *
-      FROM group_sources
-      WHERE chat_id = ?
-      LIMIT 1
-    `)
-    .bind(String(chatId))
-    .first();
-}
-
-
-// ============================================================
-// ADMIN CHECK
-// ============================================================
-
-async function isGroupAdmin(
-  chatId,
-  userId,
-  env
-) {
-
-  try {
-
-    const member =
-      await telegram(
-        env,
-        "getChatMember",
-        {
-          chat_id: chatId,
-          user_id: userId
-        }
-      );
-
-
-    return [
-      "creator",
-      "administrator"
-    ].includes(member.status);
-
-  } catch {
-
-    return false;
-  }
-}
-
-
-// ============================================================
-// SAVE USER
-// ============================================================
-
-async function saveUser(
-  user,
-  env
-) {
-
-  try {
-
-    await env.DB.prepare(`
-      INSERT INTO users
-      (
-        telegram_id,
-        username,
-        first_name
-      )
-      VALUES (?, ?, ?)
-
-      ON CONFLICT(telegram_id)
-      DO UPDATE SET
-        username = excluded.username,
-        first_name = excluded.first_name
-    `)
     .bind(
-      String(user.id),
-      user.username || "",
-      user.first_name || ""
+      status,
+      body.total_indexed ?? null,
+      body.last_message_id ?? null,
+      body.error || "",
+      jobId
     )
     .run();
 
-  } catch (error) {
 
-    console.error(
-      "SAVE USER ERROR:",
-      error?.message || error
-    );
-  }
+  return json({
+    ok: true
+  });
 }
 
 
 // ============================================================
-// TEMP MESSAGE
+// WEBHOOK
 // ============================================================
 
-async function sendTempMessage(
-  chatId,
-  text,
+async function webhook(
   env,
-  replyMarkup = {}
+  request
 ) {
 
-  const isGroup =
-    String(chatId).startsWith("-");
+  const update =
+    await request.json();
 
 
-  let finalMarkup =
-    replyMarkup;
+  try {
+
+    if (update.message) {
+
+      await handleMessage(
+        env,
+        update.message
+      );
+    }
 
 
-  if (isGroup) {
+    if (update.channel_post) {
 
-    const existingRows =
-      finalMarkup?.inline_keyboard || [];
+      await handleChannelPost(
+        env,
+        update.channel_post
+      );
+    }
 
 
-    finalMarkup = {
+    if (update.inline_query) {
 
-      inline_keyboard: [
+      await handleInlineQuery(
+        env,
+        update.inline_query
+      );
+    }
 
-        [
-          {
-            text: "🔗 CLICK HERE",
-            url: SHOPPING_URL
-          }
-        ],
 
-        ...existingRows
+    if (update.callback_query) {
 
-      ]
+      await handleCallbackQuery(
+        env,
+        update.callback_query
+      );
+    }
 
-    };
+  } catch (error) {
+
+    console.log(
+      "Webhook error:",
+      error.message
+    );
   }
+
+
+  return json({
+    ok: true
+  });
+}
+
+
+// ============================================================
+// SET WEBHOOK
+// ============================================================
+
+async function setWebhook(
+  env,
+  request
+) {
+
+  const url =
+    new URL(request.url);
+
+
+  const webhookURL =
+    `${url.origin}/webhook`;
 
 
   const result =
     await telegram(
       env,
-      "sendMessage",
+      "setWebhook",
       {
-        chat_id: chatId,
-        text,
-        parse_mode: "HTML",
-        reply_markup: finalMarkup
+        url: webhookURL,
+
+        allowed_updates: [
+          "message",
+          "channel_post",
+          "callback_query",
+          "inline_query"
+        ]
       }
     );
 
 
-  await queueDelete(
-    chatId,
-    result.message_id,
+  await setupCommands(
     env
   );
 
 
-  return result;
+  return json({
+    ok: true,
+    webhook: webhookURL,
+    result
+  });
 }
 
 
 // ============================================================
-// DELETE QUEUE
+// WEBHOOK INFO
 // ============================================================
 
-async function queueDelete(
-  chatId,
-  messageId,
+async function webhookInfo(
   env
 ) {
 
-  const deleteAt =
-    Math.floor(Date.now() / 1000)
-    + DELETE_AFTER;
+  const result =
+    await telegram(
+      env,
+      "getWebhookInfo"
+    );
 
 
-  await env.DB.prepare(`
-    INSERT INTO delete_queue
-    (
-      chat_id,
-      message_id,
-      delete_at
-    )
-    VALUES (?, ?, ?)
-  `)
-  .bind(
-    String(chatId),
-    Number(messageId),
-    deleteAt
-  )
-  .run();
+  return json({
+    ok: true,
+    result
+  });
 }
 
 
 // ============================================================
-// CLEANUP
+// INDEX STATUS
 // ============================================================
 
-async function cleanupDeletedMessages(
+async function indexStatus(
+  env
+) {
+
+  const jobs =
+    await env.DB.prepare(`
+      SELECT *
+      FROM index_jobs
+      ORDER BY id DESC
+      LIMIT 20
+    `)
+      .all();
+
+
+  return json({
+    ok: true,
+    jobs:
+      jobs.results || []
+  });
+}
+
+
+// ============================================================
+// CRON CLEANUP
+// ============================================================
+
+async function cleanup(
   env
 ) {
 
   const now =
-    Math.floor(Date.now() / 1000);
+    Math.floor(
+      Date.now() / 1000
+    );
 
 
-  const result =
+  const rows =
     await env.DB.prepare(`
       SELECT *
       FROM delete_queue
       WHERE delete_at <= ?
-      ORDER BY id
+      ORDER BY id ASC
       LIMIT 100
     `)
-    .bind(now)
-    .all();
+      .bind(now)
+      .all();
 
 
-  const rows =
-    result.results || [];
+  for (
+    const row of
+    rows.results || []
+  ) {
 
-
-  for (const row of rows) {
-
-    try {
-
-      await telegram(
-        env,
-        "deleteMessage",
-        {
-          chat_id: row.chat_id,
-          message_id: row.message_id
-        }
-      );
-
-    } catch (error) {
-
-      console.log(
-        "DELETE MESSAGE ERROR:",
-        error?.message || error
-      );
-    }
+    await safeDelete(
+      env,
+      row.chat_id,
+      row.message_id
+    );
 
 
     await env.DB.prepare(`
       DELETE FROM delete_queue
       WHERE id = ?
     `)
-    .bind(row.id)
-    .run();
+      .bind(row.id)
+      .run();
   }
 }
 
 
 // ============================================================
-// TITLE EXTRACTION
+// FETCH
 // ============================================================
 
-function extractMovieTitle(
-  post
-) {
+export default {
 
-  const text =
-    post.caption ||
-    post.text ||
-    "";
-
-
-  if (text.trim()) {
-
-    const firstLine =
-      text
-        .split(/\r?\n/)
-        .map(x => x.trim())
-        .find(Boolean);
-
-
-    if (firstLine) {
-
-      return cleanTitle(
-        firstLine
-      );
-    }
-  }
-
-
-  if (post.document?.file_name) {
-    return cleanTitle(
-      post.document.file_name
-    );
-  }
-
-
-  if (post.video?.file_name) {
-    return cleanTitle(
-      post.video.file_name
-    );
-  }
-
-
-  return "";
-}
-
-
-// ============================================================
-// QUALITY EXTRACTION
-// ============================================================
-
-function extractQuality(
-  post
-) {
-
-  const text =
-    post.caption ||
-    post.text ||
-    post.document?.file_name ||
-    post.video?.file_name ||
-    "";
-
-
-  const match =
-    text.match(
-      /(2160p|1440p|1080p|720p|480p|360p)/i
-    );
-
-
-  return match
-    ? match[1]
-    : "";
-}
-
-
-// ============================================================
-// SIZE EXTRACTION
-// ============================================================
-
-function extractSize(
-  post
-) {
-
-  const text =
-    post.caption ||
-    post.text ||
-    post.document?.file_name ||
-    post.video?.file_name ||
-    "";
-
-
-  const match =
-    text.match(
-      /\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b/i
-    );
-
-
-  return match
-    ? match[0]
-    : "";
-}
-
-
-// ============================================================
-// POSTER
-// ============================================================
-
-function extractPoster(
-  post
-) {
-
-  if (
-    post.photo &&
-    post.photo.length
+  async fetch(
+    request,
+    env
   ) {
 
-    return post.photo[
-      post.photo.length - 1
-    ].file_id;
-  }
+    try {
+
+      await ensureSchema(
+        env
+      );
 
 
-  return "";
-}
+      const url =
+        new URL(request.url);
 
 
-// ============================================================
-// CLEAN TITLE
-// ============================================================
-
-function cleanTitle(
-  value
-) {
-
-  return String(value || "")
-    .replace(/\r/g, " ")
-    .replace(/\n/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 500);
-}
+      const path =
+        url.pathname;
 
 
-// ============================================================
-// COMMAND CHECK
-// ============================================================
+      // ------------------------------------------------------
+      // HOME
+      // ------------------------------------------------------
 
-function isCommand(
-  text,
-  command
-) {
+      if (
+        request.method === "GET" &&
+        path === "/"
+      ) {
 
-  if (!text) return false;
-
-  return (
-    text === command ||
-    text.startsWith(command + " ")
-  );
-}
-
-
-// ============================================================
-// HTML ESCAPE
-// ============================================================
-
-function escapeHTML(
-  value
-) {
-
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-
-// ============================================================
-// JSON RESPONSE
-// ============================================================
-
-function json(
-  data,
-  status = 200
-) {
-
-  return new Response(
-    JSON.stringify(data, null, 2),
-    {
-      status,
-
-      headers: {
-        "content-type":
-          "application/json; charset=utf-8"
+        return new Response(
+          "Movie Update HD Bot is running.",
+          {
+            status: 200
+          }
+        );
       }
+
+
+      // ------------------------------------------------------
+      // SET WEBHOOK
+      // ------------------------------------------------------
+
+      if (
+        request.method === "GET" &&
+        path === "/setwebhook"
+      ) {
+
+        return setWebhook(
+          env,
+          request
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // WEBHOOK INFO
+      // ------------------------------------------------------
+
+      if (
+        request.method === "GET" &&
+        path === "/webhook-info"
+      ) {
+
+        return webhookInfo(
+          env
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // TELEGRAM WEBHOOK
+      // ------------------------------------------------------
+
+      if (
+        request.method === "POST" &&
+        path === "/webhook"
+      ) {
+
+        return webhook(
+          env,
+          request
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // INDEX API
+      // ------------------------------------------------------
+
+      if (
+        request.method === "POST" &&
+        path === "/index"
+      ) {
+
+        const secret =
+          request.headers.get(
+            "X-Index-Secret"
+          );
+
+
+        if (
+          secret !==
+          env.INDEX_SECRET
+        ) {
+
+          return json(
+            {
+              ok: false,
+              error: "Unauthorized"
+            },
+            401
+          );
+        }
+
+
+        return indexAPI(
+          env,
+          request
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // INDEX JOB
+      // ------------------------------------------------------
+
+      if (
+        request.method === "GET" &&
+        path === "/index-job"
+      ) {
+
+        const secret =
+          request.headers.get(
+            "X-Index-Secret"
+          );
+
+
+        if (
+          secret !==
+          env.INDEX_SECRET
+        ) {
+
+          return json(
+            {
+              ok: false,
+              error: "Unauthorized"
+            },
+            401
+          );
+        }
+
+
+        return getIndexJob(
+          env
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // UPDATE INDEX JOB
+      // ------------------------------------------------------
+
+      if (
+        request.method === "POST" &&
+        path === "/index-job/update"
+      ) {
+
+        const secret =
+          request.headers.get(
+            "X-Index-Secret"
+          );
+
+
+        if (
+          secret !==
+          env.INDEX_SECRET
+        ) {
+
+          return json(
+            {
+              ok: false,
+              error: "Unauthorized"
+            },
+            401
+          );
+        }
+
+
+        return updateIndexJob(
+          env,
+          request
+        );
+      }
+
+
+      // ------------------------------------------------------
+      // INDEX STATUS
+      // ------------------------------------------------------
+
+      if (
+        request.method === "GET" &&
+        path === "/index-status"
+      ) {
+
+        const secret =
+          url.searchParams.get(
+            "secret"
+          );
+
+
+        if (
+          secret !==
+          env.INDEX_SECRET
+        ) {
+
+          return json(
+            {
+              ok: false,
+              error: "Unauthorized"
+            },
+            401
+          );
+        }
+
+
+        return indexStatus(
+          env
+        );
+      }
+
+
+      return new Response(
+        "Not Found",
+        {
+          status: 404
+        }
+      );
+
+    } catch (error) {
+
+      console.log(
+        "Worker error:",
+        error.message
+      );
+
+
+      return json(
+        {
+          ok: false,
+          error: error.message
+        },
+        500
+      );
     }
-  );
-}
+  },
+
+
+  async scheduled(
+    event,
+    env,
+    ctx
+  ) {
+
+    ctx.waitUntil(
+      cleanup(env)
+    );
+  }
+};
