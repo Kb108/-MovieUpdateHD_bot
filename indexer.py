@@ -1,88 +1,82 @@
-import os
 import asyncio
-import logging
-import re
-from html import unescape
+import os
+import traceback
+from typing import Optional
 
 import aiohttp
 from pyrogram import Client
 from pyrogram.errors import FloodWait, RPCError
 
 
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 
-WORKER_URL = os.environ["WORKER_URL"].rstrip("/")
-INDEX_SECRET = os.environ["INDEX_SECRET"]
+WORKER_URL = os.getenv(
+    "WORKER_URL",
+    "https://movieupdatehd-bot.krishnabasakfake.workers.dev"
+).rstrip("/")
+
+INDEX_SECRET = os.getenv("INDEX_SECRET", "")
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 RETRY_SECONDS = int(os.getenv("RETRY_SECONDS", "15"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger("MovieUpdateHDIndexer")
+BATCH_SIZE = 20
 
 
-# ============================================================
-# PYROGRAM CLIENT
-# ============================================================
+# =========================================================
+# VALIDATION
+# =========================================================
+
+if not API_ID:
+    raise RuntimeError("API_ID is missing")
+
+if not API_HASH:
+    raise RuntimeError("API_HASH is missing")
+
+if not SESSION_STRING:
+    raise RuntimeError("SESSION_STRING is missing")
+
+if not INDEX_SECRET:
+    raise RuntimeError("INDEX_SECRET is missing")
+
+
+# =========================================================
+# TELEGRAM CLIENT
+# =========================================================
 
 app = Client(
     "movie_update_hd_indexer",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION_STRING,
+    session_string=SESSION_STRING
 )
 
 
-# ============================================================
+# =========================================================
 # HTTP SESSION
-# ============================================================
+# =========================================================
 
-http_session = None
+http_session: Optional[aiohttp.ClientSession] = None
 
+
+# =========================================================
+# HELPERS
+# =========================================================
 
 def headers():
     return {
         "X-Index-Secret": INDEX_SECRET,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
 
-# ============================================================
-# TEXT CLEANING
-# ============================================================
-
-def clean_text(text):
-    if not text:
-        return ""
-
-    text = unescape(str(text))
-
-    text = text.replace("\r", "\n")
-
-    # Remove excessive spaces
-    text = re.sub(r"[ \t]+", " ", text)
-
-    # Remove excessive empty lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text.strip()
-
-
-# ============================================================
-# MOVIE TITLE EXTRACTION
-# ============================================================
-
-def extract_title(message, fallback="Movie"):
+def message_text(message):
     text = ""
 
     if message.text:
@@ -91,636 +85,522 @@ def extract_title(message, fallback="Movie"):
     elif message.caption:
         text = message.caption
 
-    text = clean_text(text)
+    return text.strip()
+
+
+def extract_title(message):
+    text = message_text(message)
 
     if not text:
-        return fallback
+        return f"Movie {message.id}"
 
     lines = [
         x.strip()
-        for x in text.split("\n")
+        for x in text.splitlines()
         if x.strip()
     ]
 
     if not lines:
-        return fallback
+        return f"Movie {message.id}"
 
-    # Ignore common decorative lines
-    ignored = [
-        "download",
-        "watch now",
-        "click here",
+    title = lines[0]
+
+    # Remove common prefixes
+    prefixes = [
+        "movie:",
+        "movie -",
         "movie",
-        "full movie",
-        "telegram",
+        "title:",
+        "title -",
+        "film:",
+        "film -"
     ]
 
-    for line in lines:
+    lower = title.lower()
 
-        low = line.lower()
+    for prefix in prefixes:
+        if lower.startswith(prefix):
+            title = title[len(prefix):].strip()
+            break
 
-        if len(line) < 2:
-            continue
+    # Remove excessive formatting
+    title = title.strip(":-•| ")
 
-        if any(x == low for x in ignored):
-            continue
+    if not title:
+        title = f"Movie {message.id}"
 
-        # Ignore lines made mostly of symbols
-        alnum_count = sum(c.isalnum() for c in line)
-
-        if alnum_count < 2:
-            continue
-
-        # Remove common emojis/symbols from beginning
-        line = re.sub(
-            r"^[\W_]+",
-            "",
-            line,
-            flags=re.UNICODE
-        ).strip()
-
-        if len(line) >= 2:
-            return line[:500]
-
-    return fallback
+    return title[:300]
 
 
-# ============================================================
-# LANGUAGE EXTRACTION
-# ============================================================
-
-def extract_language(text):
-    if not text:
-        return ""
-
-    low = text.lower()
+def extract_language(message):
+    text = message_text(message).lower()
 
     languages = [
-        ("Bangla", ["bangla", "bengali"]),
-        ("Hindi", ["hindi"]),
-        ("English", ["english"]),
-        ("Tamil", ["tamil"]),
-        ("Telugu", ["telugu"]),
-        ("Malayalam", ["malayalam"]),
-        ("Kannada", ["kannada"]),
-        ("Punjabi", ["punjabi"]),
-        ("Marathi", ["marathi"]),
-        ("Korean", ["korean"]),
-        ("Japanese", ["japanese"]),
-        ("Chinese", ["chinese"]),
+        "hindi",
+        "english",
+        "bengali",
+        "bangla",
+        "tamil",
+        "telugu",
+        "malayalam",
+        "kannada",
+        "marathi",
+        "punjabi",
+        "gujarati",
+        "oriya",
+        "odia",
+        "urdu"
     ]
 
-    for name, words in languages:
-        for word in words:
-            if word in low:
-                return name
+    for language in languages:
+        if language in text:
+            return language.title()
 
     return ""
 
 
-# ============================================================
-# QUALITY EXTRACTION
-# ============================================================
+def extract_quality(message):
+    text = message_text(message).lower()
 
-def extract_quality(text):
-    if not text:
-        return ""
-
-    patterns = [
-        r"\b2160p\b",
-        r"\b1440p\b",
-        r"\b1080p\b",
-        r"\b720p\b",
-        r"\b480p\b",
-        r"\b360p\b",
-        r"\b4K\b",
-        r"\b2K\b",
-        r"\bWEB-DL\b",
-        r"\bWEBRip\b",
-        r"\bBluRay\b",
-        r"\bHDRip\b",
-        r"\bHDTV\b",
+    qualities = [
+        "2160p",
+        "4k",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+        "360p",
+        "240p",
+        "web-dl",
+        "webdl",
+        "bluray",
+        "blu-ray",
+        "hdrip",
+        "webrip",
+        "hdcam",
+        "cam"
     ]
 
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE
-        )
-
-        if match:
-            return match.group(0)
+    for quality in qualities:
+        if quality in text:
+            return quality.upper()
 
     return ""
 
 
-# ============================================================
-# SIZE EXTRACTION
-# ============================================================
+def extract_size(message):
+    text = message_text(message)
 
-def extract_size(text):
-    if not text:
-        return ""
-
-    pattern = r"\b\d+(?:\.\d+)?\s*(?:GB|MB|TB)\b"
+    import re
 
     match = re.search(
-        pattern,
+        r"(\d+(?:\.\d+)?)\s*(GB|MB|KB)",
         text,
         re.IGNORECASE
     )
 
     if match:
-        return match.group(0)
+        return f"{match.group(1)} {match.group(2).upper()}"
 
     return ""
 
 
-# ============================================================
-# GET MESSAGE TEXT
-# ============================================================
+def get_media_type(message):
+    if message.video:
+        return "video"
 
-def get_message_text(message):
+    if message.document:
+        return "document"
+
+    if message.audio:
+        return "audio"
+
+    if message.photo:
+        return "photo"
+
+    if message.animation:
+        return "animation"
+
     if message.text:
-        return message.text
+        return "text"
 
-    if message.caption:
-        return message.caption
-
-    return ""
+    return "other"
 
 
-# ============================================================
-# GET CHANNEL USERNAME
-# ============================================================
+# =========================================================
+# WORKER API
+# =========================================================
 
-async def get_channel_username(chat_id):
-    try:
-        chat = await app.get_chat(chat_id)
-
-        username = getattr(chat, "username", None)
-
-        if username:
-            return "@" + username
-
-    except Exception as e:
-        logger.warning(
-            "Could not get username for %s: %s",
-            chat_id,
-            e
-        )
-
-    return ""
-
-
-# ============================================================
-# GET CHANNEL TITLE
-# ============================================================
-
-async def get_channel_title(chat_id):
-    try:
-        chat = await app.get_chat(chat_id)
-
-        title = getattr(chat, "title", None)
-
-        if title:
-            return title
-
-    except Exception as e:
-        logger.warning(
-            "Could not get channel title: %s",
-            e
-        )
-
-    return ""
-
-
-# ============================================================
-# API REQUEST
-# ============================================================
-
-async def api_request(
-    method,
-    endpoint,
+async def worker_request(
+    method: str,
+    path: str,
     json_data=None,
-    params=None,
+    params=None
 ):
-    url = WORKER_URL + endpoint
+    global http_session
 
-    for attempt in range(1, 6):
+    if http_session is None:
+        http_session = aiohttp.ClientSession()
 
-        try:
+    url = f"{WORKER_URL}{path}"
 
-            async with http_session.request(
-                method,
-                url,
-                headers=headers(),
-                json=json_data,
-                params=params,
-                timeout=aiohttp.ClientTimeout(
-                    total=60
-                ),
-            ) as response:
+    try:
+        async with http_session.request(
+            method,
+            url,
+            headers=headers(),
+            json=json_data,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as response:
 
-                text = await response.text()
+            text = await response.text()
 
-                if response.status >= 400:
-                    raise RuntimeError(
-                        f"HTTP {response.status}: {text[:500]}"
-                    )
+            if response.status >= 400:
+                raise RuntimeError(
+                    f"Worker API error {response.status}: {text}"
+                )
 
-                if not text:
-                    return {}
+            try:
+                return await response.json()
+            except Exception:
+                return {
+                    "ok": True,
+                    "text": text
+                }
 
-                try:
-                    return await response.json(
-                        content_type=None
-                    )
-
-                except Exception:
-                    return {
-                        "raw": text
-                    }
-
-        except Exception as e:
-
-            logger.error(
-                "API request failed (%s/5): %s",
-                attempt,
-                e
-            )
-
-            if attempt < 5:
-                await asyncio.sleep(RETRY_SECONDS)
-
-            else:
-                raise
+    except Exception:
+        raise
 
 
-# ============================================================
-# GET NEXT INDEX JOB
-# ============================================================
+# =========================================================
+# GET NEXT JOB
+# =========================================================
 
 async def get_next_job():
-
-    try:
-
-        data = await api_request(
-            "GET",
-            "/index-job"
-        )
-
-        # Expected:
-        # { "job": {...} }
-
-        if not isinstance(data, dict):
-            return None
-
-        job = data.get("job")
-
-        if not job:
-            return None
-
-        return job
-
-    except Exception as e:
-
-        logger.error(
-            "Could not get index job: %s",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# UPDATE JOB
-# ============================================================
-
-async def update_job(
-    job_id,
-    status=None,
-    total_indexed=None,
-    last_message_id=None,
-    error=None,
-):
-
-    payload = {
-        "id": job_id
-    }
-
-    if status is not None:
-        payload["status"] = status
-
-    if total_indexed is not None:
-        payload["total_indexed"] = total_indexed
-
-    if last_message_id is not None:
-        payload["last_message_id"] = last_message_id
-
-    if error is not None:
-        payload["error"] = str(error)[:2000]
-
-    try:
-
-        await api_request(
-            "POST",
-            "/index-job/update",
-            json_data=payload
-        )
-
-    except Exception as e:
-
-        logger.error(
-            "Job update failed: %s",
-            e
-        )
-
-
-# ============================================================
-# INDEX ONE MOVIE
-# ============================================================
-
-async def index_movie(
-    message,
-    channel_id,
-    channel_username,
-    channel_title,
-):
-
-    text = get_message_text(message)
-
-    title = extract_title(
-        message,
-        fallback=channel_title or "Movie"
+    result = await worker_request(
+        "GET",
+        "/index-job"
     )
 
-    language = extract_language(text)
+    if not result:
+        return None
 
-    quality = extract_quality(text)
+    if result.get("ok") is False:
+        return None
 
-    size = extract_size(text)
+    job = result.get("job")
+
+    if not job:
+        return None
+
+    return job
+
+
+# =========================================================
+# SEND MOVIE TO WORKER
+# =========================================================
+
+async def send_movie(
+    job,
+    message
+):
+    chat = await app.get_chat(message.chat.id)
+
+    source_username = ""
+
+    if chat.username:
+        source_username = f"@{chat.username}"
 
     payload = {
-        "title": title,
-        "language": language,
-        "quality": quality,
-        "size": size,
-        "poster": "",
-        "channel_id": str(channel_id),
+        "channel_id": str(message.chat.id),
         "message_id": int(message.id),
-        "source_username": channel_username,
+
+        "source_username": source_username,
+
+        "title": extract_title(message),
+        "language": extract_language(message),
+        "quality": extract_quality(message),
+        "size": extract_size(message),
+
+        "media_type": get_media_type(message),
+
+        "text": message_text(message)
     }
 
-    await api_request(
+    await worker_request(
         "POST",
         "/index",
         json_data=payload
     )
 
-    return title
+
+# =========================================================
+# UPDATE JOB
+# =========================================================
+
+async def update_job(
+    job_id,
+    status,
+    total_indexed=None,
+    last_message_id=None,
+    error=""
+):
+    payload = {
+        "job_id": int(job_id),
+        "status": status
+    }
+
+    if total_indexed is not None:
+        payload["total_indexed"] = int(total_indexed)
+
+    if last_message_id is not None:
+        payload["last_message_id"] = int(last_message_id)
+
+    if error:
+        payload["error"] = str(error)[:2000]
+
+    return await worker_request(
+        "POST",
+        "/index-job/update",
+        json_data=payload
+    )
 
 
-# ============================================================
+# =========================================================
 # PROCESS JOB
-# ============================================================
+# =========================================================
 
 async def process_job(job):
+    job_id = job["id"]
 
-    job_id = job.get("id")
+    chat_id = job["source_channel_id"]
 
-    source_channel_id = job.get(
-        "source_channel_id"
-    )
+    source_username = job.get("source_username", "")
 
-    source_username = job.get(
-        "source_username",
-        ""
-    )
-
-    source_title = job.get(
-        "source_title",
-        ""
+    last_message_id = int(
+        job.get("last_message_id") or 0
     )
 
     total_indexed = int(
-        job.get(
-            "total_indexed",
-            0
-        ) or 0
+        job.get("total_indexed") or 0
     )
 
-    last_message_id = int(
-        job.get(
-            "last_message_id",
-            0
-        ) or 0
-    )
-
-    if not source_channel_id:
-        await update_job(
-            job_id,
-            status="failed",
-            error="Source channel ID is missing"
-        )
-        return
-
-    logger.info(
-        "Starting job %s | Channel: %s",
-        job_id,
-        source_channel_id
-    )
+    print()
+    print("====================================")
+    print("NEW INDEX JOB")
+    print("====================================")
+    print(f"Job ID: {job_id}")
+    print(f"Source: {chat_id}")
+    print(f"Username: {source_username}")
+    print(f"Already indexed: {total_indexed}")
+    print(f"Last message ID: {last_message_id}")
+    print("====================================")
 
     try:
+        chat = await app.get_chat(chat_id)
 
-        # ----------------------------------------------------
-        # Check channel access
-        # ----------------------------------------------------
-
-        chat = await app.get_chat(
-            int(source_channel_id)
+        print(
+            f"Connected to source: "
+            f"{chat.title or chat.username or chat.id}"
         )
 
-        actual_title = (
-            getattr(chat, "title", None)
-            or source_title
-            or ""
-        )
+        messages_batch = []
 
-        actual_username = (
-            getattr(chat, "username", None)
-        )
-
-        if actual_username:
-            actual_username = (
-                "@" + actual_username
-            )
-
-        elif source_username:
-            actual_username = source_username
-
-        else:
-            actual_username = ""
-
-        logger.info(
-            "Connected to channel: %s %s",
-            actual_title,
-            actual_username
-        )
-
-        # ----------------------------------------------------
-        # Resume from last message
-        # ----------------------------------------------------
-
-        offset_id = last_message_id
-
-        processed_since_update = 0
+        # -------------------------------------------------
+        # Telegram history
+        # -------------------------------------------------
 
         async for message in app.get_chat_history(
             chat.id,
-            offset_id=offset_id
+            offset_id=last_message_id
         ):
 
-            # Ignore empty service messages
-            if (
-                not message.text
-                and not message.caption
-                and not message.media
-            ):
+            if message.id <= last_message_id:
                 continue
 
-            try:
+            messages_batch.append(message)
 
-                title = await index_movie(
-                    message=message,
-                    channel_id=chat.id,
-                    channel_username=actual_username,
-                    channel_title=actual_title,
+            if len(messages_batch) >= BATCH_SIZE:
+
+                for item in reversed(messages_batch):
+
+                    try:
+                        await send_movie(
+                            job,
+                            item
+                        )
+
+                        total_indexed += 1
+
+                    except FloodWait as e:
+                        print(
+                            f"FloodWait: sleeping {e.value} seconds"
+                        )
+
+                        await asyncio.sleep(e.value)
+
+                        try:
+                            await send_movie(
+                                job,
+                                item
+                            )
+
+                            total_indexed += 1
+
+                        except Exception as retry_error:
+                            print(
+                                "Retry error:",
+                                retry_error
+                            )
+
+                    except Exception as item_error:
+                        print(
+                            "Message index error:",
+                            item_error
+                        )
+
+                    last_message_id = max(
+                        last_message_id,
+                        item.id
+                    )
+
+                messages_batch.clear()
+
+                await update_job(
+                    job_id,
+                    "running",
+                    total_indexed,
+                    last_message_id
+                )
+
+                print(
+                    f"Indexed: {total_indexed} | "
+                    f"Last ID: {last_message_id}"
+                )
+
+        # -------------------------------------------------
+        # Remaining messages
+        # -------------------------------------------------
+
+        for item in reversed(messages_batch):
+
+            try:
+                await send_movie(
+                    job,
+                    item
                 )
 
                 total_indexed += 1
-                processed_since_update += 1
-
-                # Save progress
-                if (
-                    processed_since_update >= 10
-                    or total_indexed == 1
-                ):
-
-                    await update_job(
-                        job_id,
-                        status="running",
-                        total_indexed=total_indexed,
-                        last_message_id=message.id,
-                        error=""
-                    )
-
-                    processed_since_update = 0
-
-                    logger.info(
-                        "Job %s | Indexed: %s | Last ID: %s | %s",
-                        job_id,
-                        total_indexed,
-                        message.id,
-                        title[:80]
-                    )
 
             except FloodWait as e:
-
-                logger.warning(
-                    "FloodWait: sleeping %s seconds",
-                    e.value
+                print(
+                    f"FloodWait: sleeping {e.value} seconds"
                 )
 
                 await asyncio.sleep(e.value)
 
-            except Exception as e:
+                try:
+                    await send_movie(
+                        job,
+                        item
+                    )
 
-                logger.error(
-                    "Message %s failed: %s",
-                    message.id,
-                    e
+                    total_indexed += 1
+
+                except Exception as retry_error:
+                    print(
+                        "Retry error:",
+                        retry_error
+                    )
+
+            except Exception as item_error:
+                print(
+                    "Message index error:",
+                    item_error
                 )
 
-                # Continue with next movie
-                continue
-
-        # ----------------------------------------------------
-        # FINAL UPDATE
-        # ----------------------------------------------------
+            last_message_id = max(
+                last_message_id,
+                item.id
+            )
 
         await update_job(
             job_id,
-            status="completed",
-            total_indexed=total_indexed,
-            last_message_id=last_message_id,
-            error=""
+            "completed",
+            total_indexed,
+            last_message_id
         )
 
-        logger.info(
-            "JOB %s COMPLETED | Total: %s",
-            job_id,
-            total_indexed
-        )
+        print()
+        print("====================================")
+        print("INDEX JOB COMPLETED")
+        print("====================================")
+        print(f"Job ID: {job_id}")
+        print(f"Total indexed: {total_indexed}")
+        print(f"Last message ID: {last_message_id}")
+        print("====================================")
 
     except FloodWait as e:
 
-        logger.warning(
-            "FloodWait outside loop: %s seconds",
-            e.value
+        print(
+            f"FloodWait outside loop: "
+            f"{e.value} seconds"
         )
 
         await asyncio.sleep(e.value)
 
         await update_job(
             job_id,
-            status="pending",
-            total_indexed=total_indexed,
-            last_message_id=last_message_id,
-            error=f"FloodWait: {e.value}"
+            "pending",
+            total_indexed,
+            last_message_id,
+            f"FloodWait: {e.value}"
         )
 
-    except RPCError as e:
+    except Exception as error:
 
-        logger.error(
-            "Telegram RPC error: %s",
-            e
-        )
+        print()
+        print("====================================")
+        print("INDEX JOB FAILED")
+        print("====================================")
+        print(str(error))
+        traceback.print_exc()
+        print("====================================")
 
         await update_job(
             job_id,
-            status="pending",
-            total_indexed=total_indexed,
-            last_message_id=last_message_id,
-            error=str(e)
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Job %s failed",
-            job_id
-        )
-
-        await update_job(
-            job_id,
-            status="pending",
-            total_indexed=total_indexed,
-            last_message_id=last_message_id,
-            error=str(e)
+            "pending",
+            total_indexed,
+            last_message_id,
+            str(error)
         )
 
 
-# ============================================================
-# MAIN WORKER LOOP
-# ============================================================
+# =========================================================
+# MAIN LOOP
+# =========================================================
 
-async def worker_loop():
+async def main():
+    print()
+    print("====================================")
+    print(" Movie Update HD Automatic Indexer")
+    print("====================================")
+    print()
+    print(f"Worker URL: {WORKER_URL}")
+    print(f"Poll: {POLL_SECONDS}s")
+    print()
+    print("Starting Telegram client...")
+    print()
 
-    logger.info(
-        "Movie Update HD Automatic Indexer Started"
-    )
+    await app.start()
+
+    me = await app.get_me()
+
+    print("Telegram account connected:")
+    print(f"ID: {me.id}")
+    print(f"Username: @{me.username}" if me.username else "Username: None")
+    print()
 
     while True:
 
@@ -730,11 +610,6 @@ async def worker_loop():
 
             if job:
 
-                logger.info(
-                    "New indexing job received: %s",
-                    job.get("id")
-                )
-
                 await process_job(job)
 
             else:
@@ -743,57 +618,38 @@ async def worker_loop():
                     POLL_SECONDS
                 )
 
-        except Exception as e:
+        except KeyboardInterrupt:
+            break
 
-            logger.exception(
-                "Worker loop error: %s",
-                e
-            )
+        except Exception as error:
+
+            print()
+            print("Main loop error:")
+            print(error)
+            traceback.print_exc()
+            print()
 
             await asyncio.sleep(
                 RETRY_SECONDS
             )
 
 
-# ============================================================
-# START
-# ============================================================
-
-async def main():
-
+async def shutdown():
     global http_session
 
-    http_session = aiohttp.ClientSession()
-
     try:
+        await app.stop()
+    except Exception:
+        pass
 
-        await app.start()
-
-        me = await app.get_me()
-
-        logger.info(
-            "Telegram account connected: @%s",
-            me.username or me.first_name
-        )
-
-        logger.info(
-            "Worker URL: %s",
-            WORKER_URL
-        )
-
-        await worker_loop()
-
-    finally:
-
-        if http_session:
-            await http_session.close()
-
-        try:
-            await app.stop()
-        except Exception:
-            pass
+    if http_session:
+        await http_session.close()
 
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+        print("Indexer stopped.")
