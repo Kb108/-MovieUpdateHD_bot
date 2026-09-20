@@ -1,11 +1,16 @@
 name = "movieupdatehd-bot"
 main = "worker.js"
-compatibility_date = "2026-09-20"
+compatibility_date = "2026-09-01"
 
-[triggers]
-crons = ["* * * * *"]
+workers_dev = true
+
+[vars]
+DELETE_AFTER = "300"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "movie_filter_db"
-database_id = "abb47ffd-f8da-4132-b218-11c7cb552b37"
+database_id = "PUT_YOUR_D1_DATABASE_ID_HERE"
+
+[triggers]
+crons = ["* * * * *"]
