@@ -97,7 +97,7 @@ app = Client(
 
 
 # =========================================================
-# HEADERS
+# COMMON HEADERS
 # =========================================================
 
 HEADERS = {
@@ -114,11 +114,16 @@ def get_job():
 
     try:
 
+        # IMPORTANT:
+        # Cloudflare Worker expects secret in query parameter
+        url = (
+            f"{WORKER_URL}/index-job"
+            f"?secret={INDEX_SECRET}"
+        )
+
         response = requests.get(
-            f"{WORKER_URL}/index-job",
-            headers={
-                "X-Index-Secret": INDEX_SECRET
-            },
+            url,
+            headers=HEADERS,
             timeout=30
         )
 
@@ -128,10 +133,6 @@ def get_job():
             response.text[:1000],
             flush=True
         )
-
-        # No job
-        if response.status_code == 204:
-            return None
 
         if response.status_code != 200:
 
@@ -146,68 +147,40 @@ def get_job():
 
         data = response.json()
 
-        # -------------------------------------------------
-        # IMPORTANT:
-        # Worker may return:
-        #
-        # {
-        #   "ok": true,
-        #   "job": {
-        #       "id": 1,
-        #       "chat_id": "...",
-        #       ...
-        #   }
-        # }
-        #
-        # OR directly:
-        #
-        # {
-        #   "id": 1,
-        #   "chat_id": "...",
-        #   ...
-        # }
-        # -------------------------------------------------
+        if not isinstance(data, dict):
+            return None
 
-        if isinstance(data, dict):
+        job = None
 
-            # Job inside "job"
-            if isinstance(data.get("job"), dict):
+        if isinstance(data.get("job"), dict):
+            job = data["job"]
 
-                job = data["job"]
+        elif isinstance(data.get("data"), dict):
+            job = data["data"]
 
-            # Job inside "data"
-            elif isinstance(data.get("data"), dict):
+        elif data.get("id") is not None:
+            job = data
 
-                job = data["data"]
+        if not job:
 
-            # Direct job
-            elif data.get("id") is not None:
+            print(
+                "No job available.",
+                flush=True
+            )
 
-                job = data
+            return None
 
-            else:
+        if job.get("id") is None:
 
-                print(
-                    "No valid job found in Worker response.",
-                    flush=True
-                )
+            print(
+                "Job found but ID is missing:",
+                job,
+                flush=True
+            )
 
-                return None
+            return None
 
-            # Make sure job ID exists
-            if job.get("id") is None:
-
-                print(
-                    "Job found but ID is missing:",
-                    job,
-                    flush=True
-                )
-
-                return None
-
-            return job
-
-        return None
+        return job
 
     except Exception as e:
 
@@ -221,7 +194,7 @@ def get_job():
 
 
 # =========================================================
-# COMPLETE JOB
+# COMPLETE / UPDATE JOB
 # =========================================================
 
 def complete_job(
@@ -234,7 +207,7 @@ def complete_job(
     if job_id is None:
 
         print(
-            "ERROR: Cannot complete job because job_id is None.",
+            "ERROR: job_id is missing.",
             flush=True
         )
 
@@ -244,20 +217,28 @@ def complete_job(
         "job_id": job_id,
         "status": status,
         "total_indexed": total_indexed,
-        "error_message": error_message
+        "last_message_id": 0,
+        "error": error_message
     }
 
     try:
 
+        # IMPORTANT:
+        # Your Worker uses /index-job/update
+        url = (
+            f"{WORKER_URL}/index-job/update"
+            f"?secret={INDEX_SECRET}"
+        )
+
         response = requests.post(
-            f"{WORKER_URL}/index-job-complete",
+            url,
             headers=HEADERS,
             json=payload,
             timeout=30
         )
 
         print(
-            "Job complete response:",
+            "Job update response:",
             response.status_code,
             response.text[:1000],
             flush=True
@@ -418,7 +399,6 @@ def extract_language(text):
         if item.lower() not in [
             x.lower() for x in unique
         ]:
-
             unique.append(item)
 
     return ", ".join(unique[:4])
@@ -447,7 +427,6 @@ def extract_quality(text):
         if item.lower() not in [
             x.lower() for x in unique
         ]:
-
             unique.append(item)
 
     return ", ".join(unique[:5])
@@ -476,17 +455,13 @@ def extract_size(text):
 
 def get_message_text(message):
 
-    text = ""
-
     if getattr(message, "text", None):
+        return message.text
 
-        text = message.text
+    if getattr(message, "caption", None):
+        return message.caption
 
-    elif getattr(message, "caption", None):
-
-        text = message.caption
-
-    return text or ""
+    return ""
 
 
 # =========================================================
@@ -501,21 +476,18 @@ def get_file_name(message):
             message.document
             and message.document.file_name
         ):
-
             return message.document.file_name
 
         if (
             message.video
             and message.video.file_name
         ):
-
             return message.video.file_name
 
         if (
             message.audio
             and message.audio.file_name
         ):
-
             return message.audio.file_name
 
     except Exception:
@@ -541,17 +513,14 @@ def build_movie(
     combined_text = text
 
     if not combined_text and file_name:
-
         combined_text = file_name
 
     if not combined_text:
-
         return None
 
     title = clean_title(combined_text)
 
     if not title:
-
         return None
 
     lower_title = title.lower()
@@ -571,7 +540,6 @@ def build_movie(
         word in lower_title
         for word in ignored_words
     ):
-
         return None
 
     language = extract_language(
@@ -586,28 +554,16 @@ def build_movie(
         combined_text
     )
 
-    movie = {
-
+    return {
         "title": title,
-
         "language": language,
-
         "quality": quality,
-
         "size": size,
-
         "poster": "",
-
         "channel_id": str(channel_id),
-
         "message_id": int(message.id),
-
-        "source_username": (
-            source_username or ""
-        )
+        "source_username": source_username or ""
     }
-
-    return movie
 
 
 # =========================================================
@@ -625,24 +581,21 @@ def get_source_chat(job):
     )
 
     if source_username:
-
         return source_username
 
     if source_channel_id:
 
         try:
-
             return int(source_channel_id)
 
         except Exception:
-
             return source_channel_id
 
     return None
 
 
 # =========================================================
-# PROCESS JOB
+# PROCESS INDEX JOB
 # =========================================================
 
 def process_job(job):
@@ -716,6 +669,13 @@ def process_job(job):
             flush=True
         )
 
+        # Use Telegram's actual ID.
+        # This is important for private/public channels.
+        source_channel_id = info.id
+
+        if info.username:
+            source_username = f"@{info.username}"
+
     except Exception as e:
 
         print(
@@ -746,6 +706,12 @@ def process_job(job):
         )
 
         print(
+            "Source:",
+            source_username or source_channel_id,
+            flush=True
+        )
+
+        print(
             "This may take some time for large channels.",
             flush=True
         )
@@ -761,7 +727,6 @@ def process_job(job):
                 )
 
                 if not movie:
-
                     continue
 
                 success = send_movie(movie)
@@ -971,7 +936,7 @@ def index_loop():
 
 if __name__ == "__main__":
 
-    # Start Render health server
+    # Render health server
     health_thread = threading.Thread(
         target=start_health_server,
         daemon=True
@@ -979,5 +944,5 @@ if __name__ == "__main__":
 
     health_thread.start()
 
-    # Start Telegram indexer
+    # Telegram indexer
     index_loop()
