@@ -2,27 +2,16 @@
 // START MENU
 // ============================================================
 
-async function sendStart(
-  env,
-  chatId
-) {
+async function sendStart(env, chatId) {
+  const me = await telegram(env, "getMe", {});
 
-  const me =
-    await telegram(
-      env,
-      "getMe",
-      {}
-    );
+  const username = me.ok && me.result?.username
+    ? me.result.username
+    : "";
 
-  const username =
-    me.ok
-      ? me.result.username
-      : "";
-
-  const addGroupURL =
-    username
-      ? `https://t.me/${username}?startgroup=true`
-      : "https://t.me";
+  const addGroupURL = username
+    ? `https://t.me/${username}?startgroup=true`
+    : "https://t.me";
 
 
   const text =
@@ -42,10 +31,9 @@ async function sendStart(
 
 
   const keyboard = {
-
     inline_keyboard: [
 
-      // ADD GROUP
+      // ADD YOUR GROUP
       [
         {
           text: "➕ ADD YOUR GROUP",
@@ -59,7 +47,6 @@ async function sendStart(
           text: "📢 SOURCE",
           callback_data: "menu_source"
         },
-
         {
           text: "⚙️ SET SOURCE",
           callback_data: "menu_setsource"
@@ -72,14 +59,13 @@ async function sendStart(
           text: "❓ HELP",
           callback_data: "menu_help"
         },
-
         {
           text: "✨ ABOUT",
           callback_data: "menu_about"
         }
       ],
 
-      // SHOPPING
+      // SHOPPING OFFERS
       [
         {
           text: "🛍️ SHOPPING OFFERS",
