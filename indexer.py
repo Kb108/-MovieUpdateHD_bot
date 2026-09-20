@@ -33,11 +33,19 @@ async function sendStart(env, chatId) {
   const keyboard = {
     inline_keyboard: [
 
-      // ADD YOUR GROUP
+      // ADD ME TO GROUP
       [
         {
-          text: "➕ ADD YOUR GROUP",
+          text: "➕ ADD ME TO GROUP",
           url: addGroupURL
+        }
+      ],
+
+      // SEARCH MOVIES
+      [
+        {
+          text: "🔎 SEARCH MOVIES",
+          callback_data: "menu_search"
         }
       ],
 
