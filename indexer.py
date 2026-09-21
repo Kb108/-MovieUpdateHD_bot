@@ -4,6 +4,8 @@ import traceback
 from typing import Optional
 
 import aiohttp
+from aiohttp import web
+
 from pyrogram import Client
 from pyrogram.errors import FloodWait, RPCError
 
@@ -16,10 +18,6 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 
-# IMPORTANT:
-# Only the base Worker URL should be stored in Render.
-# Example:
-# https://movieupdatehd-bot.krishnabasakfake.workers.dev
 WORKER_URL = os.getenv(
     "WORKER_URL",
     "https://movieupdatehd-bot.krishnabasakfake.workers.dev"
@@ -32,6 +30,9 @@ RETRY_SECONDS = int(os.getenv("RETRY_SECONDS", "15"))
 
 BATCH_SIZE = 20
 HTTP_TIMEOUT = 60
+
+# Render Web Service port
+PORT = int(os.getenv("PORT", "10000"))
 
 
 # =========================================================
@@ -55,13 +56,6 @@ if not INDEX_SECRET:
 # NORMALIZE WORKER URL
 # =========================================================
 
-# Prevent accidental values like:
-# /index-job
-# /index
-# /index-job/
-#
-# The Render environment should contain only the base URL.
-
 for suffix in (
     "/index-job/update",
     "/index-job",
@@ -69,7 +63,9 @@ for suffix in (
     "/index",
 ):
     if WORKER_URL.endswith(suffix):
-        WORKER_URL = WORKER_URL[: -len(suffix)].rstrip("/")
+        WORKER_URL = WORKER_URL[
+            :-len(suffix)
+        ].rstrip("/")
 
 
 INDEX_JOB_URL = f"{WORKER_URL}/index-job"
@@ -97,10 +93,54 @@ http_session: Optional[aiohttp.ClientSession] = None
 
 
 # =========================================================
+# RENDER HEALTH SERVER
+# =========================================================
+
+async def health(request):
+    return web.json_response(
+        {
+            "ok": True,
+            "service": "Movie Update HD Indexer",
+            "status": "running",
+        }
+    )
+
+
+async def start_health_server():
+
+    server_app = web.Application()
+
+    server_app.router.add_get("/", health)
+    server_app.router.add_get("/health", health)
+
+    runner = web.AppRunner(server_app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=PORT,
+    )
+
+    await site.start()
+
+    print()
+    print("==============================================")
+    print(" RENDER HEALTH SERVER")
+    print("==============================================")
+    print(f"Port   : {PORT}")
+    print("Status : ONLINE")
+    print("==============================================")
+    print()
+
+
+# =========================================================
 # HTTP HELPERS
 # =========================================================
 
 def get_headers():
+
     return {
         "X-Index-Secret": INDEX_SECRET,
         "Content-Type": "application/json",
@@ -108,6 +148,7 @@ def get_headers():
 
 
 def print_worker_config():
+
     print()
     print("==============================================")
     print(" WORKER CONFIGURATION")
@@ -126,64 +167,57 @@ async def worker_request(
     json_data=None,
     params=None,
 ):
+
     global http_session
 
     if http_session is None or http_session.closed:
+
         http_session = aiohttp.ClientSession()
 
     try:
+
         async with http_session.request(
             method=method,
             url=url,
             headers=get_headers(),
             json=json_data,
             params=params,
-            timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT),
+            timeout=aiohttp.ClientTimeout(
+                total=HTTP_TIMEOUT
+            ),
         ) as response:
 
             text = await response.text()
 
-            # -------------------------------------------------
-            # Successful response
-            # -------------------------------------------------
-
             if 200 <= response.status < 300:
 
                 try:
+
                     return await response.json(
                         content_type=None
                     )
 
                 except Exception:
+
                     return {
                         "ok": True,
                         "text": text,
                     }
 
-            # -------------------------------------------------
-            # Authentication error
-            # -------------------------------------------------
-
             if response.status == 401:
+
                 raise RuntimeError(
                     "Worker API returned 401 Unauthorized. "
                     "Check INDEX_SECRET in Render and Cloudflare."
                 )
 
-            # -------------------------------------------------
-            # Not found
-            # -------------------------------------------------
-
             if response.status == 404:
+
                 raise RuntimeError(
                     f"Worker API returned 404 Not Found.\n"
                     f"URL: {url}\n"
                     f"Response: {text}"
                 )
-
-            # -------------------------------------------------
-            # Other HTTP error
-            # -------------------------------------------------
 
             raise RuntimeError(
                 f"Worker API error {response.status}.\n"
@@ -192,11 +226,13 @@ async def worker_request(
             )
 
     except asyncio.TimeoutError:
+
         raise RuntimeError(
             f"Worker API timeout.\nURL: {url}"
         )
 
     except aiohttp.ClientError as error:
+
         raise RuntimeError(
             f"Worker connection error: {error}\n"
             f"URL: {url}"
@@ -208,6 +244,7 @@ async def worker_request(
 # =========================================================
 
 def message_text(message):
+
     if message.text:
         return message.text.strip()
 
@@ -394,6 +431,134 @@ async def get_next_job():
 
 
 # =========================================================
+# RESOLVE TELEGRAM SOURCE
+# =========================================================
+
+async def resolve_source(
+    chat_id,
+    source_username="",
+):
+    """
+    Resolve Telegram source safely.
+
+    Priority:
+    1. Username
+    2. Numeric chat ID
+    """
+
+    username = (
+        str(source_username or "")
+        .strip()
+        .replace("https://t.me/", "")
+        .replace("http://t.me/", "")
+        .strip("/")
+    )
+
+    username = username.lstrip("@")
+
+    # -----------------------------------------------------
+    # METHOD 1: USERNAME
+    # -----------------------------------------------------
+
+    if username:
+
+        print()
+        print(
+            f"Trying Telegram username: @{username}"
+        )
+
+        try:
+
+            chat = await app.get_chat(
+                f"@{username}"
+            )
+
+            print(
+                "Username resolved successfully."
+            )
+
+            print(
+                f"Resolved ID : {chat.id}"
+            )
+
+            print(
+                f"Title       : "
+                f"{chat.title or 'N/A'}"
+            )
+
+            print(
+                f"Username    : "
+                f"@{chat.username}"
+                if chat.username
+                else "Username    : None"
+            )
+
+            return chat
+
+        except Exception as error:
+
+            print()
+            print(
+                "Username resolution failed:"
+            )
+
+            print(error)
+
+    # -----------------------------------------------------
+    # METHOD 2: NUMERIC CHAT ID
+    # -----------------------------------------------------
+
+    if chat_id is not None:
+
+        print()
+        print(
+            f"Trying numeric Telegram ID: {chat_id}"
+        )
+
+        try:
+
+            chat = await app.get_chat(
+                int(chat_id)
+            )
+
+            print(
+                "Numeric chat ID resolved successfully."
+            )
+
+            print(
+                f"Resolved ID : {chat.id}"
+            )
+
+            print(
+                f"Title       : "
+                f"{chat.title or 'N/A'}"
+            )
+
+            return chat
+
+        except Exception as error:
+
+            print()
+            print(
+                "Numeric chat ID resolution failed:"
+            )
+
+            print(error)
+
+    # -----------------------------------------------------
+    # BOTH FAILED
+    # -----------------------------------------------------
+
+    raise RuntimeError(
+        "Unable to access the source channel.\n\n"
+        f"Username: @{username if username else 'N/A'}\n"
+        f"Chat ID: {chat_id}\n\n"
+        "Make sure the Telegram account used by "
+        "SESSION_STRING is a member of the source channel."
+    )
+
+
+# =========================================================
 # SEND MOVIE TO CLOUDFLARE
 # =========================================================
 
@@ -406,25 +571,46 @@ async def send_movie(message):
     source_username = ""
 
     if chat.username:
-        source_username = f"@{chat.username}"
+
+        source_username = (
+            f"@{chat.username}"
+        )
 
     payload = {
-        "channel_id": str(message.chat.id),
-        "message_id": int(message.id),
+
+        "channel_id": str(
+            message.chat.id
+        ),
+
+        "message_id": int(
+            message.id
+        ),
 
         "source_username": source_username,
 
-        "title": extract_title(message),
+        "title": extract_title(
+            message
+        ),
 
-        "language": extract_language(message),
+        "language": extract_language(
+            message
+        ),
 
-        "quality": extract_quality(message),
+        "quality": extract_quality(
+            message
+        ),
 
-        "size": extract_size(message),
+        "size": extract_size(
+            message
+        ),
 
-        "media_type": get_media_type(message),
+        "media_type": get_media_type(
+            message
+        ),
 
-        "text": message_text(message),
+        "text": message_text(
+            message
+        ),
     }
 
     return await worker_request(
@@ -447,7 +633,9 @@ async def update_job(
 ):
 
     payload = {
+
         "job_id": int(job_id),
+
         "status": status,
     }
 
@@ -465,7 +653,9 @@ async def update_job(
 
     if error:
 
-        payload["error"] = str(error)[:2000]
+        payload["error"] = str(
+            error
+        )[:2000]
 
     return await worker_request(
         "POST",
@@ -485,11 +675,16 @@ async def index_one_message(
 
     try:
 
-        await send_movie(message)
+        await send_movie(
+            message
+        )
 
         total_indexed += 1
 
-        return total_indexed, True
+        return (
+            total_indexed,
+            True,
+        )
 
     except FloodWait as error:
 
@@ -504,11 +699,16 @@ async def index_one_message(
 
         try:
 
-            await send_movie(message)
+            await send_movie(
+                message
+            )
 
             total_indexed += 1
 
-            return total_indexed, True
+            return (
+                total_indexed,
+                True,
+            )
 
         except Exception as retry_error:
 
@@ -517,7 +717,10 @@ async def index_one_message(
                 retry_error,
             )
 
-            return total_indexed, False
+            return (
+                total_indexed,
+                False,
+            )
 
     except Exception as error:
 
@@ -526,7 +729,10 @@ async def index_one_message(
             error,
         )
 
-        return total_indexed, False
+        return (
+            total_indexed,
+            False,
+        )
 
 
 # =========================================================
@@ -535,9 +741,13 @@ async def index_one_message(
 
 async def process_job(job):
 
-    job_id = int(job["id"])
+    job_id = int(
+        job["id"]
+    )
 
-    chat_id = job["source_channel_id"]
+    chat_id = job.get(
+        "source_channel_id"
+    )
 
     source_username = (
         job.get("source_username")
@@ -545,33 +755,46 @@ async def process_job(job):
     )
 
     total_indexed = int(
-        job.get("total_indexed") or 0
+        job.get("total_indexed")
+        or 0
     )
 
     last_message_id = int(
-        job.get("last_message_id") or 0
+        job.get("last_message_id")
+        or 0
     )
 
     print()
     print("==============================================")
     print(" NEW INDEX JOB")
     print("==============================================")
-    print(f"Job ID          : {job_id}")
-    print(f"Source Channel  : {chat_id}")
-    print(f"Username        : {source_username}")
-    print(f"Already Indexed : {total_indexed}")
-    print(f"Last Message ID : {last_message_id}")
+    print(
+        f"Job ID          : {job_id}"
+    )
+    print(
+        f"Source Channel  : {chat_id}"
+    )
+    print(
+        f"Username        : {source_username}"
+    )
+    print(
+        f"Already Indexed : {total_indexed}"
+    )
+    print(
+        f"Last Message ID : {last_message_id}"
+    )
     print("==============================================")
     print()
 
     try:
 
         # -------------------------------------------------
-        # Connect to source
+        # RESOLVE SOURCE
         # -------------------------------------------------
 
-        chat = await app.get_chat(
-            chat_id
+        chat = await resolve_source(
+            chat_id,
+            source_username,
         )
 
         chat_name = (
@@ -580,17 +803,36 @@ async def process_job(job):
             or str(chat.id)
         )
 
+        print()
         print(
-            f"Connected to source: {chat_name}"
+            "=============================================="
+        )
+        print(
+            " TELEGRAM SOURCE CONNECTED"
+        )
+        print(
+            "=============================================="
+        )
+        print(
+            f"Name     : {chat_name}"
+        )
+        print(
+            f"Chat ID  : {chat.id}"
         )
 
+        if chat.username:
+
+            print(
+                f"Username : @{chat.username}"
+            )
+
         print(
-            f"Starting history from message ID "
-            f"{last_message_id}"
+            "=============================================="
         )
+        print()
 
         # -------------------------------------------------
-        # Mark job running
+        # MARK JOB RUNNING
         # -------------------------------------------------
 
         await update_job(
@@ -600,16 +842,13 @@ async def process_job(job):
             last_message_id,
         )
 
+        print(
+            f"Starting history from message ID "
+            f"{last_message_id}"
+        )
+
         # -------------------------------------------------
-        # IMPORTANT:
-        #
-        # get_chat_history returns newest -> oldest.
-        #
-        # We collect messages and process them oldest
-        # -> newest inside each batch.
-        #
-        # offset_id is intentionally NOT used here.
-        # We use message IDs to resume safely.
+        # HISTORY
         # -------------------------------------------------
 
         batch = []
@@ -618,19 +857,24 @@ async def process_job(job):
             chat.id
         ):
 
-            # Skip messages already indexed
+            # Skip already indexed
             if message.id <= last_message_id:
+
                 continue
 
             # Skip service messages
             if message.service:
+
                 last_message_id = max(
                     last_message_id,
-                    message.id
+                    message.id,
                 )
+
                 continue
 
-            batch.append(message)
+            batch.append(
+                message
+            )
 
             if len(batch) >= BATCH_SIZE:
 
@@ -647,7 +891,6 @@ async def process_job(job):
                         total_indexed,
                     )
 
-                    # Always move progress forward
                     last_message_id = max(
                         last_message_id,
                         item.id,
@@ -669,7 +912,7 @@ async def process_job(job):
                 )
 
         # -------------------------------------------------
-        # Remaining messages
+        # REMAINING
         # -------------------------------------------------
 
         if batch:
@@ -713,9 +956,15 @@ async def process_job(job):
         print("==============================================")
         print(" INDEX JOB COMPLETED")
         print("==============================================")
-        print(f"Job ID          : {job_id}")
-        print(f"Total Indexed   : {total_indexed}")
-        print(f"Last Message ID : {last_message_id}")
+        print(
+            f"Job ID          : {job_id}"
+        )
+        print(
+            f"Total Indexed   : {total_indexed}"
+        )
+        print(
+            f"Last Message ID : {last_message_id}"
+        )
         print("==============================================")
         print()
 
@@ -734,13 +983,19 @@ async def process_job(job):
             error.value
         )
 
-        await update_job(
-            job_id,
-            "pending",
-            total_indexed,
-            last_message_id,
-            f"FloodWait: {error.value}",
-        )
+        try:
+
+            await update_job(
+                job_id,
+                "pending",
+                total_indexed,
+                last_message_id,
+                f"FloodWait: {error.value}",
+            )
+
+        except Exception:
+
+            pass
 
     except RPCError as error:
 
@@ -748,8 +1003,11 @@ async def process_job(job):
         print("==============================================")
         print(" TELEGRAM RPC ERROR")
         print("==============================================")
-        print(error)
+        print(
+            error
+        )
         print("==============================================")
+        print()
 
         try:
 
@@ -762,6 +1020,7 @@ async def process_job(job):
             )
 
         except Exception:
+
             pass
 
         await asyncio.sleep(
@@ -774,8 +1033,12 @@ async def process_job(job):
         print("==============================================")
         print(" INDEX JOB ERROR")
         print("==============================================")
-        print(error)
+        print(
+            error
+        )
+
         traceback.print_exc()
+
         print("==============================================")
         print()
 
@@ -822,6 +1085,16 @@ async def main():
 
     print()
 
+    # -----------------------------------------------------
+    # START RENDER HEALTH SERVER
+    # -----------------------------------------------------
+
+    await start_health_server()
+
+    # -----------------------------------------------------
+    # START TELEGRAM
+    # -----------------------------------------------------
+
     print(
         "Starting Telegram client..."
     )
@@ -830,27 +1103,54 @@ async def main():
 
     await app.start()
 
+    # -----------------------------------------------------
+    # TELEGRAM ACCOUNT INFO
+    # -----------------------------------------------------
+
     me = await app.get_me()
 
-    print("Telegram account connected:")
-    print(f"ID       : {me.id}")
+    print()
+    print("==============================================")
+    print(" TELEGRAM ACCOUNT")
+    print("==============================================")
+    print(
+        f"ID       : {me.id}"
+    )
 
     if me.username:
+
         print(
             f"Username : @{me.username}"
         )
+
     else:
+
         print(
             "Username : None"
         )
 
+    if me.first_name:
+
+        print(
+            f"Name     : {me.first_name}"
+        )
+
+    print("==============================================")
     print()
+
+    # -----------------------------------------------------
+    # READY
+    # -----------------------------------------------------
 
     print("==============================================")
     print(" INDEXER IS READY")
     print(" Waiting for index jobs...")
     print("==============================================")
     print()
+
+    # -----------------------------------------------------
+    # MAIN LOOP
+    # -----------------------------------------------------
 
     while True:
 
@@ -884,8 +1184,12 @@ async def main():
             print("==============================================")
             print(" MAIN LOOP ERROR")
             print("==============================================")
-            print(error)
+            print(
+                error
+            )
+
             traceback.print_exc()
+
             print("==============================================")
             print()
 
@@ -914,7 +1218,10 @@ async def shutdown():
 
     try:
 
-        if http_session and not http_session.closed:
+        if (
+            http_session
+            and not http_session.closed
+        ):
 
             await http_session.close()
 
@@ -947,6 +1254,10 @@ if __name__ == "__main__":
         print("==============================================")
         print(" FATAL ERROR")
         print("==============================================")
-        print(error)
+        print(
+            error
+        )
+
         traceback.print_exc()
+
         print("==============================================")
